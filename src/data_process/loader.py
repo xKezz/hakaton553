@@ -48,6 +48,15 @@ class ColumnFinder:
         "выручка": 4
     }
 
+    AMOUNT_EXCLUDE_KEYWORDS = {
+        "discount",
+        "скидка",
+        "refund",
+        "возврат",
+        "tax",
+        "налог"
+    }
+
     def __init__(self, df):
         self.df = df
 
@@ -180,30 +189,38 @@ class ColumnFinder:
             if values.empty:
                 return 0.0
 
-            parsed_dates = pd.Series(
-                pd.NaT,
-                index=values.index,
-                dtype="datetime64[ns]"
+            # Маска валидных дат.
+            valid_dates = pd.Series(
+                False,
+                index=values.index
             )
 
-            # Обычные даты: 2025-09-23, 23.09.2025 и т.д.
+            # Обычные даты и даты со временем:
+            # 2026-09-01
+            # 01.09.2026
+            # 2026-01-05T08:42:00+03:00
             non_numeric = ~values.str.fullmatch(r"\d+")
 
-            parsed_dates.loc[non_numeric] = pd.to_datetime(
+            parsed_dates = pd.to_datetime(
                 values.loc[non_numeric],
-                errors="coerce"
+                format="mixed",
+                dayfirst=True,
+                errors="coerce",
+                utc=True
             )
-
-            # Числовой формат YYYYMMDD.
+            valid_dates.loc[non_numeric] = parsed_dates.notna()
             yyyymmdd = values.str.fullmatch(r"\d{8}")
 
-            parsed_dates.loc[yyyymmdd] = pd.to_datetime(
+            parsed_yyyymmdd = pd.to_datetime(
                 values.loc[yyyymmdd],
                 format="%Y%m%d",
-                errors="coerce"
+                errors="coerce",
+                utc=True
             )
 
-            valid_ratio = parsed_dates.notna().sum() / len(values)
+            valid_dates.loc[yyyymmdd] = parsed_yyyymmdd.notna()
+
+            valid_ratio = valid_dates.mean()
 
             column_name = self.normalize_column_name(column)
 
@@ -253,6 +270,12 @@ class ColumnFinder:
             valid_ratio = numeric_values.notna().mean()
 
             column_name = self.normalize_column_name(column)
+
+            if any(
+                self.normalize_column_name(keyword) in column_name
+                for keyword in self.AMOUNT_EXCLUDE_KEYWORDS
+            ):
+                return 0.0
 
             keyword_score = max(
                 (
