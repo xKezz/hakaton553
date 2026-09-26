@@ -1,9 +1,7 @@
 import pandas as pd
 import phonenumbers
-from loader import ColumnFinder
 
 class Preprocessor:
-
     def __init__(self, df: pd.DataFrame, default_region: str = "RU"):
         self.df = df
         self.default_region = default_region
@@ -137,44 +135,3 @@ class Preprocessor:
             pd.Series: колонка с числовыми значениями суммы.
         """
         return self.df[column].apply(self.normalize_amount)
-
-
-if __name__ == "__main__":
-    from loader import ColumnFinder
-
-    df = pd.read_csv(
-        "../../data/source_files/for_predprocess.csv"
-    )
-
-    finder = ColumnFinder(df)
-
-    phone_column = finder.find_phone_column()
-    date_column = finder.find_date_column()
-    amount_column = finder.find_amount_column()
-
-    processor = Preprocessor(df)
-
-    normalized_phone = processor.process_phone_column(
-        phone_column
-    )
-
-    normalized_date = processor.process_date_column(
-        date_column
-    )
-
-    normalized_amount = processor.process_amount_column(
-        amount_column
-    )
-
-    processed_df = pd.DataFrame({
-        "client_id": normalized_phone,
-        "purchase_date": normalized_date,
-        "amount": normalized_amount
-    })
-
-    processed_df.to_csv(
-        "../../data/processed_files/processed_data.csv",
-        index=False
-    )
-
-    print(processed_df)

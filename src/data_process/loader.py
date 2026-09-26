@@ -295,15 +295,3 @@ class ColumnFinder:
         print(f"\nКолонка с суммой покупки: {amount_column}")
 
         return amount_column
-
-
-if __name__ == "__main__":
-    df = pd.read_csv(
-        "../../data/source_files/for_predprocess.csv"
-    )
-
-    finder = ColumnFinder(df)
-
-    phone_column = finder.find_phone_column()
-    date_column = finder.find_date_column()
-    amount_column = finder.find_amount_column()

@@ -1,13 +1,11 @@
 from __future__ import annotations
-
 import warnings
 from itertools import product
 from typing import Optional
-
 import numpy as np
 import pandas as pd
 
-from business_metrics import BusinessMetrics, normalize_series
+from segmentation.business_metrics import BusinessMetrics, normalize_series
 
 METRIC_COLS = ["recency", "frequency", "monetary_score"]
 

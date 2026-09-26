@@ -1,33 +1,30 @@
 from __future__ import annotations
-
 import json
 import warnings
 from datetime import datetime
 from typing import Any, Dict, Optional
-
 import pandas as pd
 
-from .segmentation.business_metrics import BusinessMetrics
-from .recommendations.discount_policy import DiscountPolicy
-from .segmentation.user_categories import UserCategories
+from segmentation.business_metrics import BusinessMetrics
+from recommendations.bonus_policy import BonusPolicy
+from segmentation.user_categories import UserCategories
 
-
-def build_discount_report(
+def build_bonus_report(
     path_data: Optional[str] = None,
     data: Optional[pd.DataFrame] = None,
     reference_date: Optional[pd.Timestamp] = None,
     count_cat: int = 3,
     method: str = "win-back",
-    max_discount: float = 30.0,
-    step: float = 5.0,
+    max_bonus_points: float = 300.0,  # Изменено
+    step: float = 50.0,                # Изменено
     need_free: float = 0.25,
     value_cut: float = 0.20,
-    churn_discount: float = 5.0,
-    single_category_discount: Optional[float] = None,
+    churn_bonus: float = 50.0,         # Изменено
+    single_category_bonus: Optional[float] = None, # Изменено
     include_client_ids: bool = True,
 ) -> Dict[str, Any]:
     """
-    Собирает итоговый отчёт в формате словаря, готового к выгрузке в JSON.
+    Собирает итоговый отчёт по бонусам в формате словаря, готового к выгрузке в JSON/БД.
     """
     requested_count_cat = int(count_cat)
 
@@ -47,14 +44,15 @@ def build_discount_report(
 
         uc.users_cat(requested_count_cat)
 
-        dp = DiscountPolicy(
+        # Передаем правильные аргументы в новый класс
+        bp = BonusPolicy(
             uc,
-            max_discount=max_discount,
+            max_bonus_points=max_bonus_points,
             step=step,
             need_free=need_free,
             value_cut=value_cut,
-            churn_discount=churn_discount,
-            single_category_discount=single_category_discount,
+            churn_bonus=churn_bonus,
+            single_category_bonus=single_category_bonus,
         )
 
     seen = set()
@@ -79,8 +77,8 @@ def build_discount_report(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "reference_date": bm.reference_date.date().isoformat(),
         "method": method,
-        "max_discount": float(dp.max_discount),
-        "step": float(dp.step),
+        "max_bonus_points": float(bp.max_bonus_points),
+        "step": float(bp.step),
         "requested_count_cat": requested_count_cat,
         "effective_count_cat": int(uc.effective_count_cat or 0),
         "monetary_formula": "0.40*total_norm + 0.40*avg_norm + 0.20*frequency_norm",
@@ -96,10 +94,11 @@ def build_discount_report(
             "clients": [],
         }
 
-    clients_df = dp.clients()
+    clients_df = bp.clients()
 
-    if "discount" in clients_df.columns:
-        clients_df["discount"] = clients_df["discount"].fillna(0.0)
+    # Работаем с новой колонкой proposed_bonus
+    if "proposed_bonus" in clients_df.columns:
+        clients_df["proposed_bonus"] = clients_df["proposed_bonus"].fillna(0.0)
 
     if "reason" in clients_df.columns:
         clients_df["reason"] = clients_df["reason"].fillna("нет категории")
@@ -107,8 +106,8 @@ def build_discount_report(
     clients_df = clients_df.sort_values("client_id").reset_index(drop=True)
 
     policy_by_campaign = (
-        dp.policy.set_index("campaign")
-        if not dp.policy.empty
+        bp.policy.set_index("campaign")
+        if not bp.policy.empty
         else pd.DataFrame()
     )
 
@@ -129,16 +128,18 @@ def build_discount_report(
         if not group.empty:
             if not policy_by_campaign.empty and campaign_int in policy_by_campaign.index:
                 policy_row = policy_by_campaign.loc[campaign_int]
-                discount = float(policy_row["discount"])
+                proposed = float(policy_row["proposed_bonus"])
                 reason = str(policy_row["reason"])
             else:
-                discount = float(group["discount"].iloc[0])
+                proposed = float(group["proposed_bonus"].iloc[0])
                 reason = str(group["reason"].iloc[0])
 
             category = {
-                "campaign": campaign_int,
+                # В БД это поле называется segment_group (0-26)
+                "segment_group": campaign_int, 
                 "label": f"priority_{campaign_int}",
-                "discount": discount,
+                "proposed_bonus": int(proposed), # Целое число баллов
+                "final_bonus": int(proposed),    # Изначально равно proposed, фронтенд будет его менять
                 "reason": reason,
                 "clients_count": int(len(group)),
                 "avg_recency": float(group["recency"].mean()),
@@ -154,9 +155,10 @@ def build_discount_report(
 
         else:
             category = {
-                "campaign": campaign_int,
+                "segment_group": campaign_int,
                 "label": f"priority_{campaign_int}",
-                "discount": 0.0,
+                "proposed_bonus": 0,
+                "final_bonus": 0,
                 "reason": "нет клиентов в категории",
                 "clients_count": 0,
                 "avg_recency": 0.0,
@@ -176,8 +178,8 @@ def build_discount_report(
         clients.append(
             {
                 "client_id": str(row.client_id),
-                "campaign": int(row.campaign),
-                "discount": float(row.discount),
+                "segment_group": int(row.campaign), # Маппим campaign -> segment_group
+                "proposed_bonus": float(row.proposed_bonus), # Переименовано
                 "reason": str(row.reason),
                 "recency": int(row.recency),
                 "frequency": int(row.frequency),
@@ -194,11 +196,11 @@ def build_discount_report(
     }
 
 
-def save_discount_report(path: str, **kwargs) -> Dict[str, Any]:
+def save_bonus_report(path: str, **kwargs) -> Dict[str, Any]:
     """
     Собирает отчёт и сохраняет его в JSON-файл.
     """
-    report = build_discount_report(**kwargs)
+    report = build_bonus_report(**kwargs)
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)

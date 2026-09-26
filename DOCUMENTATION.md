@@ -1,1225 +1,336 @@
-# Система автоматического расчёта скидок для маркетинговых кампаний
+# Документация системы клиентской аналитики и бонусной политики
 
-Проект рассчитывает клиентские метрики, строит сегментацию на основе модифицированного RFM-подхода, назначает клиентов на маркетинговые категории и автоматически подбирает скидки для кампании возврата клиентов (`win-back`).
-
-Итоговый результат может быть выгружен в структурированный `JSON`-отчёт, содержащий:
-
-- метаинформацию;
-- список категорий;
-- список клиентов;
-- назначенные скидки;
-- причины назначения скидки;
-- предупреждения о качестве данных и настройках политики.
+Данный документ описывает архитектуру, классы, функции и внутреннюю логику модулей системы для автоматического расчёта бонусной политики на основе RFM-анализа.
 
 ---
 
-## 1. Основная идея
-
-Для каждого клиента рассчитываются показатели:
-
-| Показатель | Описание |
-|---|---|
-| `recency` | количество дней с момента последней покупки |
-| `frequency` | количество покупок |
-| `total_amount` | общая сумма покупок |
-| `avg_amount` | средний чек |
-| `monetary_score` | комбинированный нормированный показатель ценности клиента |
-
-Далее строится матрица сегментов:
-
-```text
-3 уровня recency × 3 уровня frequency × 3 уровня monetary_score
-```
-
-Максимально возможное количество базовых групп:
-
-```text
-3 × 3 × 3 = 27
-```
-
-Затем базовые группы сортируются по приоритету и разбиваются на `count_cat` маркетинговых категорий.
-
-Для кампании `win-back`:
-
-- категория `0` — самая приоритетная;
-- чем больше клиент не покупал и чем выше его ценность, тем выше приоритет.
+## Содержание
+1. [Модуль `loader.py` — Автоматическое определение колонок](#1-модуль-loaderpy--автоматическое-определение-колонок)
+2. [Модуль `predprocessing.py` — Предобработка данных](#2-модуль-predprocessingpy--предобработка-данных)
+3. [Модуль `business_metrics.py` — Расчёт бизнес-метрик](#3-модуль-business_metricspy--расчёт-бизнес-метрик)
+4. [Модуль `user_categories.py` — Сегментация и категоризация](#4-модуль-user_categoriespy--сегментация-и-категоризация)
+5. [Модуль `bonus_policy.py` — Расчёт бонусной политики](#5-модуль-bonus_policypy--расчёт-бонусной-политики)
+6. [Модуль `pipeline_areon.py` — Оркестрация пайплайна и отчётность](#6-модуль-pipeline_areonpy--оркестрация-пайплайна-и-отчётность)
+7. [Архитектура и поток данных](#7-архитектура-и-поток-данных)
 
 ---
 
-## 2. Структура проекта
+## 1. Модуль `loader.py` — Автоматическое определение колонок
 
-```text
-.
-├── business_metrics.py
-├── user_categories.py
-├── discount_policy.py
-├── pipeline.py
-├── requirements.txt
-└── main.py
-```
+Модуль предназначен для эвристического поиска целевых колонок (телефон, дата, сумма) в произвольном `DataFrame` на основе анализа названий и статистики содержимого.
 
----
+### Класс `ColumnFinder`
 
-## 3. Требования
+Класс-детектор колонок. Анализирует переданный `DataFrame` и находит наиболее подходящие столбцы.
 
-Проект использует:
-
-- `Python 3.10+`;
-- `pandas`;
-- `numpy`.
-
-Рекомендуемые версии указаны в `requirements.txt`:
-
-```text
-pandas>=2.0.0
-numpy>=1.26.0
-```
-
----
-
-## 4. Установка
-
-### 4.1. Перейти в папку проекта
-
-```bash
-cd "путь/к/проекту"
-```
-
-Например:
-
-```bash
-cd "/mnt/c/Users/ASUS/Desktop/Учеба/Hacatons/hacaton_max553/realise 1.0"
-```
-
-или в Windows:
-
-```powershell
-cd "C:\Users\ASUS\Desktop\Учеба\Hacatons\hacaton_max553\realise 1.0"
-```
-
-### 4.2. Создать виртуальное окружение
-
-```bash
-python -m venv .venv
-```
-
-или:
-
-```bash
-python3 -m venv .venv
-```
-
-### 4.3. Активировать виртуальное окружение
-
-#### Windows
-
-```powershell
-.venv\Scripts\activate
-```
-
-#### Linux / WSL / macOS
-
-```bash
-source .venv/bin/activate
-```
-
-### 4.4. Установить зависимости
-
-```bash
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Если файла `requirements.txt` нет, можно установить вручную:
-
-```bash
-python -m pip install pandas numpy
-```
-
----
-
-## 5. Формат входных данных
-
-Входной файл должен быть подготовлен заранее.
-
-Ожидаемые колонки:
-
-```text
-client_id,purchase_date,amount
-```
-
-Пример:
-
-```csv
-client_id,purchase_date,amount
-+79991234567,2026-05-01,390.0
-+79991234567,2026-06-01,450.0
-+79997654321,2026-04-15,1200.0
-```
-
-### Требования к колонкам
-
-| Колонка | Тип | Описание |
+#### Атрибуты класса (Константы)
+| Атрибут | Тип | Описание |
 |---|---|---|
-| `client_id` | строка | идентификатор клиента |
-| `purchase_date` | дата | дата покупки |
-| `amount` | число | сумма покупки |
+| `PHONE_KEYWORDS` | `dict` | Словарь ключевых слов для поиска телефона и их весов (например, `"phone": 10`). |
+| `DATE_KEYWORDS` | `dict` | Словарь ключевых слов для поиска даты и их весов. |
+| `AMOUNT_KEYWORDS` | `dict` | Словарь ключевых слов для поиска суммы и их весов. |
+| `AMOUNT_EXCLUDE_KEYWORDS` | `set` | Множество слов-исключений для суммы (например, `"discount"`, `"скидка"`). |
 
-Особенности:
+#### Атрибуты экземпляра
+| Атрибут | Тип | Описание |
+|---|---|---|
+| `df` | `pd.DataFrame` | Исходный DataFrame для анализа. |
 
-- `client_id` читается как строка;
-- это позволяет сохранять `+`, ведущие нули и другие нечисловые идентификаторы;
-- `purchase_date` парсится как дата;
-- `amount` приводится к числу;
-- рекомендуемый формат даты: `YYYY-MM-DD`.
+#### Методы
 
----
+**`__init__(self, df: pd.DataFrame)`**
+* **Описание:** Инициализирует детектор, сохраняя ссылку на DataFrame.
 
-## 6. Быстрый старт
+**`normalize_column_name(name: str) -> str`** *(статический)*
+* **Описание:** Нормализует название колонки для регистронезависимого сравнения без учёта разделителей.
+* **Логика:** Удаляет все не-буквенно-цифровые символы и пробелы с помощью `re.sub(r"[\W_]+", "", name.lower())`.
 
-### 6.1. Генерация отчёта из CSV
+**`find_columns(self, keywords: List[str]) -> List[str]`**
+* **Описание:** Возвращает список колонок, в нормализованном названии которых содержится хотя бы одно из ключевых слов.
 
-```python
-from pipeline import save_discount_report
+**`find_best_column(self, keywords: List[str], score_function: Callable) -> str`**
+* **Описание:** Находит лучшую колонку среди кандидатов.
+* **Логика:** 
+  1. Отбирает кандидатов через `find_columns`.
+  2. Для каждого вычисляет `score` с помощью переданной `score_function`.
+  3. Возвращает колонку с максимальным score. Выбрасывает `ValueError`, если кандидатов нет.
 
-save_discount_report(
-    path="discount_report.json",
-    path_data="clients.csv",
-    count_cat=3,
-    max_discount=30.0,
-    step=5.0,
-)
-```
+**`find_phone_column(self) -> str`**
+* **Описание:** Находит колонку с телефонами.
+* **Внутренняя логика (`phone_score`):** 
+  1. Считает долю валидных номеров (длина очищенных от не-цифр символов от 9 до 15).
+  2. Умножает эту долю (`valid_ratio`) на максимальный вес ключевого слова из `PHONE_KEYWORDS`, найденного в имени колонки.
 
-После выполнения в текущей папке появится файл:
+**`find_date_column(self) -> str`**
+* **Описание:** Находит колонку с датами.
+* **Внутренняя логика (`date_score`):**
+  1. Пытается распарсить значения как даты (поддерживает смешанные форматы и `YYYYMMDD`).
+  2. Считает долю успешно распарсенных дат (`valid_ratio`).
+  3. Итоговый score = `keyword_score * valid_ratio`.
 
-```text
-discount_report.json
-```
-
----
-
-### 6.2. Генерация отчёта с фиксированной датой отсчёта
-
-Для воспроизводимости результатов рекомендуется передавать `reference_date`.
-
-```python
-import pandas as pd
-
-from pipeline import save_discount_report
-
-save_discount_report(
-    path="discount_report.json",
-    path_data="clients.csv",
-    reference_date=pd.Timestamp("2026-06-22"),
-    count_cat=3,
-    max_discount=30.0,
-    step=5.0,
-)
-```
+**`find_amount_column(self) -> str`**
+* **Описание:** Находит колонку с суммами.
+* **Внутренняя логика (`amount_score`):**
+  1. Если в имени есть слова из `AMOUNT_EXCLUDE_KEYWORDS`, score = 0.
+  2. Иначе пытается преобразовать значения в `float` (заменяя `,` на `.`).
+  3. Итоговый score = `keyword_score * valid_ratio` (доля успешно преобразованных).
 
 ---
 
-### 6.3. Генерация отчёта из pandas DataFrame
+## 2. Модуль `predprocessing.py` — Предобработка данных
 
-```python
-import pandas as pd
+Модуль отвечает за очистку и нормализацию сырых данных: приведение телефонов к E.164, дат к `YYYY-MM-DD`, а сумм к `float`.
 
-from pipeline import build_discount_report
+### Класс `Preprocessor`
 
-df = pd.DataFrame(
-    {
-        "client_id": ["+79991234567", "+79997654321"],
-        "purchase_date": ["2026-05-01", "2026-04-15"],
-        "amount": [390.0, 1200.0],
-    }
-)
+#### Атрибуты экземпляра
+| Атрибут | Тип | Описание |
+|---|---|---|
+| `df` | `pd.DataFrame` | Исходный DataFrame. |
+| `default_region` | `str` | Код региона по умолчанию для парсинга телефонов (по умолчанию `"RU"`). |
 
-report = build_discount_report(
-    data=df,
-    reference_date=pd.Timestamp("2026-06-22"),
-    count_cat=2,
-)
+#### Методы
 
-print(report["meta"])
-print(report["categories"])
-print(report["clients"])
-```
+**`__init__(self, df: pd.DataFrame, default_region: str = "RU")`**
+* **Описание:** Инициализация препроцессора.
 
----
+**`normalize_phone(phone: str, default_region: str = "RU") -> str | None`** *(статический)*
+* **Описание:** Приводит номер к формату E.164.
+* **Логика:** 
+  1. Обрабатывает `NaN` и пустые строки.
+  2. Заменяет префикс `"00"` на `"+"`.
+  3. Парсит номер через библиотеку `phonenumbers`. Если номер начинается с `"+"`, регион не используется.
+  4. Проверяет валидность (`is_valid_number`) и форматирует в E.164. При ошибках возвращает `None`.
 
-## 7. Основные модули
+**`process_phone_column(self, column: str) -> pd.Series`**
+* **Описание:** Применяет `normalize_phone` ко всей колонке.
 
-### 7.1. `business_metrics.py`
+**`normalize_date(date: str) -> str | None`** *(статический)*
+* **Описание:** Приводит дату к формату `YYYY-MM-DD`.
+* **Логика:** 
+  1. Если строка из 8 цифр, парсит как `%Y%m%d`.
+  2. Иначе парсит через `format="mixed", dayfirst=True`.
+  3. Форматирует результат в `YYYY-MM-DD`. При ошибках возвращает `None`.
 
-Модуль отвечает за загрузку данных и расчёт клиентских метрик.
+**`process_date_column(self, column: str) -> pd.Series`**
+* **Описание:** Применяет `normalize_date` ко всей колонке.
 
-Основной класс:
+**`normalize_amount(amount) -> float | None`** *(статический)*
+* **Описание:** Приводит сумму к `float`.
+* **Логика:** Удаляет пробелы, заменяет запятые на точки, преобразует в `float`. При `ValueError` возвращает `None`.
 
-```python
-BusinessMetrics
-```
-
-Пример:
-
-```python
-import pandas as pd
-
-from business_metrics import BusinessMetrics
-
-bm = BusinessMetrics(
-    path_data="clients.csv",
-    reference_date=pd.Timestamp("2026-06-22"),
-)
-
-metrics = bm.metrics()
-
-print(metrics.head())
-```
-
-Результат содержит колонки:
-
-```text
-client_id
-last_purchase_date
-recency
-frequency
-total_amount
-avg_amount
-monetary_score
-```
+**`process_amount_column(self, column: str) -> pd.Series`**
+* **Описание:** Применяет `normalize_amount` ко всей колонке.
 
 ---
 
-### 7.2. `user_categories.py`
+## 3. Модуль `business_metrics.py` — Расчёт бизнес-метрик
 
-Модуль строит матрицу категорий и назначает клиентов на категории.
+Модуль загружает данные, валидирует их и рассчитывает агрегированные RFM-метрики для каждого клиента.
 
-Основной класс:
+### Константы модуля
+* `CLIENT_ID_COL = "client_id"`
+* `DATE_COL = "purchase_date"`
+* `AMOUNT_COL = "amount"`
+* `REQUIRED_COLUMNS = ("client_id", "purchase_date", "amount")`
 
-```python
-UserCategories
-```
+### Функция `normalize_series(series: pd.Series, constant: float = 0.5) -> pd.Series`
+* **Описание:** Минимаксная нормировка числовой серии в диапазон `[0, 1]`.
+* **Логика:** Вычисляет `(s - min) / (max - min)`. Если диапазон равен 0 или не конечен, возвращает серию, заполненную значением `constant`.
 
-Пример:
+### Класс `BusinessMetrics`
 
-```python
-from user_categories import UserCategories
+#### Атрибуты экземпляра
+| Атрибут | Тип | Описание |
+|---|---|---|
+| `path_data` | `str \| None` | Путь к CSV-файлу. |
+| `reference_date` | `pd.Timestamp` | Дата отсчёта для расчёта recency. |
+| `data` | `pd.DataFrame` | Очищенные и валидированные исходные данные. |
+| `metrics_df` | `pd.DataFrame` | Рассчитанные метрики по клиентам. |
 
-uc = UserCategories(
-    path_to_data="clients.csv",
-    reference_date=pd.Timestamp("2026-06-22"),
-    method="win-back",
-)
+#### Методы
 
-clients_with_campaign = uc.users_cat(count_cat=3)
+**`__init__(self, path_data=None, data=None, reference_date=None)`**
+* **Описание:** Загружает данные через `_load`, строит метрики через `_build_metrics`. Если `reference_date` не задан, используется текущая дата.
 
-print(clients_with_campaign.head())
-```
+**`_warn(self, message: str) -> None`**
+* **Описание:** Генерирует `UserWarning` с указанием на вызывающий код (`stacklevel=3`).
 
-После вызова `users_cat()` таблица клиентов содержит колонку:
+**`_load(self, data, path_data) -> pd.DataFrame`**
+* **Описание:** Загрузка и строгая валидация данных.
+* **Логика:**
+  1. Читает CSV или копирует переданный DataFrame.
+  2. Проверяет наличие обязательных колонок.
+  3. Приводит `client_id` к строке, очищает от мусора (`"nan"`, `"none"`).
+  4. Парсит `purchase_date` и `amount`. При ошибках парсинга выбрасывает `ValueError`.
+  5. Удаляет строки с невалидными `client_id`, датами или суммами (с предупреждением).
 
-```text
-campaign
-```
+**`_build_metrics(self) -> pd.DataFrame`**
+* **Описание:** Расчёт агрегированных метрик.
+* **Логика:**
+  1. Клипует будущие даты до `reference_date`.
+  2. Группирует по `client_id`: считает `last_purchase_date`, `frequency` (count), `total_amount` (sum), `avg_amount` (mean).
+  3. `recency` = дни между `reference_date` и `last_purchase_date`.
+  4. `monetary_score` = `0.40 * norm(total) + 0.40 * norm(avg) + 0.20 * norm(freq)`. Клипируется в `[0, 1]`.
 
-Где:
-
-```text
-0 — самая приоритетная категория
-1 — менее приоритетная
-2 — ещё менее приоритетная
-...
-```
-
----
-
-### 7.3. `discount_policy.py`
-
-Модуль рассчитывает скидку для каждой маркетинговой категории.
-
-Основной класс:
-
-```python
-DiscountPolicy
-```
-
-Пример:
-
-```python
-from discount_policy import DiscountPolicy
-
-dp = DiscountPolicy(
-    uc,
-    max_discount=30.0,
-    step=5.0,
-)
-
-clients = dp.clients()
-
-print(clients.head())
-```
-
-Результат содержит:
-
-```text
-client_id
-campaign
-discount
-reason
-```
+**`metrics(self) -> pd.DataFrame`**
+* **Описание:** Возвращает копию таблицы метрик.
 
 ---
 
-### 7.4. `pipeline.py`
+## 4. Модуль `user_categories.py` — Сегментация и категоризация
 
-Модуль объединяет все шаги и формирует итоговый `JSON`-отчёт.
+Модуль строит матрицу идеальных категорий (на основе min/mean/max метрик), назначает клиентов в ближайшие группы и объединяет их в маркетинговые кампании.
 
-Основные функции:
+### Константы
+* `METRIC_COLS = ["recency", "frequency", "monetary_score"]`
 
-```python
-build_discount_report()
-save_discount_report()
-```
+### Функция `_transform_with_bounds(values, min_vals, max_vals, constant=0.5) -> np.ndarray`
+* **Описание:** Минимаксное масштабирование 2D-массива по заданным границам. Если диапазон по столбцу нулевой, заполняет `constant`.
 
----
+### Класс `UserCategories`
 
-## 8. Параметры запуска
+#### Атрибуты класса
+| Атрибут | Тип | Описание |
+|---|---|---|
+| `METHOD_CONFIGS` | `dict` | Словарь стратегий. По умолчанию содержит `"win-back"` с весами `(0.60, 0.10, 0.30)` и `recency_higher_is_better=True`. |
 
-### 8.1. Основные параметры `build_discount_report`
+#### Атрибуты экземпляра
+| Атрибут | Тип | Описание |
+|---|---|---|
+| `business_metrics` | `BusinessMetrics` | Объект с метриками. |
+| `method` | `str` | Название стратегии. |
+| `rfm_df` | `pd.DataFrame` | Таблица клиентов с добавляемыми колонками `group_id`, `distance`, `campaign`. |
+| `categories_matrix` | `pd.DataFrame` | Матрица категорий с колонками метрик и `score`. |
 
-| Параметр | Тип | Значение по умолчанию | Описание |
-|---|---:|---:|---|
-| `path_data` | `str` или `None` | `None` | путь к CSV-файлу |
-| `data` | `pd.DataFrame` или `None` | `None` | готовый DataFrame с данными |
-| `reference_date` | `pd.Timestamp` или `None` | сегодня | дата отсчёта |
-| `count_cat` | `int` | `3` | количество маркетинговых категорий |
-| `method` | `str` | `"win-back"` | маркетинговая стратегия |
-| `max_discount` | `float` | `30.0` | максимальная скидка в процентах |
-| `step` | `float` | `5.0` | шаг скидки |
-| `need_free` | `float` | `0.25` | порог, ниже которого скидка не нужна |
-| `value_cut` | `float` | `0.20` | порог отсечения низкой ценности |
-| `churn_discount` | `float` | `5.0` | минимальная скидка для отточного сегмента |
-| `single_category_discount` | `float` или `None` | `None` | фиксированная скидка для одной категории |
-| `include_client_ids` | `bool` | `True` | включать ли `client_ids` в категории |
+#### Методы
 
----
+**`register_strategy(cls, name, weights, recency_higher_is_better=True)`** *(classmethod)*
+* **Описание:** Регистрирует новую стратегию в `METHOD_CONFIGS`. Валидирует, что весов ровно 3 и их сумма > 0.
 
-## 9. Дата отсчёта и будущие даты
+**`__init__(self, path_to_data=None, data=None, business_metrics=None, reference_date=None, method="win-back")`**
+* **Описание:** Инициализация. Создаёт `BusinessMetrics`, если он не передан. Строит матрицу категорий.
 
-### 9.1. Дата отсчёта
+**`get_categories_matrix(self, method=None) -> pd.DataFrame`**
+* **Описание:** Строит матрицу всех комбинаций 3 уровней (min, mean, max) по 3 метрикам.
+* **Логика:**
+  1. Генерирует декартово произведение уровней (до 27 строк).
+  2. Нормализует метрики. Если `recency_higher_is_better=False`, инвертирует `recency`.
+  3. Считает `score` как взвешенную сумму нормализованных метрик.
+  4. Сортирует по убыванию `score` (категория 0 — самая приоритетная).
 
-По умолчанию используется сегодняшний день без времени:
+**`assign_rfm_groups(self) -> pd.DataFrame`**
+* **Описание:** Назначает каждому клиенту ближайшую группу из матрицы.
+* **Логика:** Масштабирует метрики клиентов и матрицы в `[0, 1]` с одинаковыми границами. Вычисляет матрицу евклидовых расстояний и для каждого клиента выбирает `argmin`. Добавляет колонки `group_id` и `distance`.
 
-```python
-pd.Timestamp.today().normalize()
-```
-
-Для воспроизводимости рекомендуется передавать дату вручную:
-
-```python
-reference_date=pd.Timestamp("2026-06-22")
-```
-
----
-
-### 9.2. Будущие даты
-
-Если дата покупки больше `reference_date`:
-
-```text
-purchase_date > reference_date
-```
-
-то такая дата обрезается до `reference_date`.
-
-Логика:
-
-```python
-effective_purchase_date = min(purchase_date, reference_date)
-last_purchase_date = max(effective_purchase_date)
-recency = reference_date - last_purchase_date
-recency = max(recency, 0)
-```
-
-Следовательно:
-
-```text
-recency для будущих покупок = 0
-```
-
-Если в данных найдены будущие даты, код пишет предупреждение:
-
-```text
-Найдены покупки с датой позже reference_date. Они будут обрезаны до даты отсчёта.
-```
+**`users_cat(self, count_cat: int) -> pd.DataFrame`**
+* **Описание:** Разбивает группы матрицы на `count_cat` маркетинговых категорий (`campaign`).
+* **Логика:**
+  1. Делит строки матрицы на `count_cat` равных частей через `np.array_split`.
+  2. Назначает каждой части ID кампании (от 0 до `count_cat - 1`).
+  3. Если `group_id` ещё не назначен, вызывает `assign_rfm_groups`.
+  4. Мапит `group_id` клиентов в `campaign` через матрицу.
 
 ---
 
-## 10. Клиентские метрики
+## 5. Модуль `bonus_policy.py` — Расчёт бонусной политики
 
-Для каждого клиента рассчитываются:
+Модуль автоматически рассчитывает размер бонусных баллов для каждой маркетинговой категории на основе индексов потребности (`need`) и ценности (`value`).
 
-```text
-client_id
-last_purchase_date
-recency
-frequency
-total_amount
-avg_amount
-monetary_score
-```
+### Класс `BonusPolicy`
 
-### 10.1. `recency`
+#### Атрибуты экземпляра
+| Атрибут | Тип | Описание |
+|---|---|---|
+| `rfm` | `pd.DataFrame` | Данные клиентов с метриками и `campaign`. |
+| `max_bonus_points` | `float` | Максимальный бонус (по умолчанию 1000.0 в пайплайне, 250.0 в классе). |
+| `step` | `float` | Шаг округления бонуса (по умолчанию 50.0). |
+| `need_free` | `float` | Порог `need`, ниже которого бонус не нужен (0.25). |
+| `value_cut` | `float` | Порог `value` для определения «низкой ценности» (0.20). |
+| `churn_bonus` | `float` | Минимальный бонус «последнего шанса» при оттоке (50.0). |
+| `policy` | `pd.DataFrame` | Рассчитанная таблица политики по категориям. |
 
-Количество дней с последней покупки.
+#### Методы
 
-```text
-recency = reference_date - last_purchase_date
-```
+**`__init__(self, cat_users, max_bonus_points=250.0, step=50.0, need_free=0.25, value_cut=0.20, churn_bonus=50.0, single_category_bonus=None)`**
+* **Описание:** Инициализация и валидация параметров. Запускает расчёт через `_compute`.
 
-Если последняя покупка в будущем, `recency = 0`.
+**`_empty_policy() -> pd.DataFrame`** *(статический)*
+* **Описание:** Возвращает пустой DataFrame со стандартными колонками политики.
 
----
+**`_round_to_step(value: float, step: float) -> float`** *(статический)*
+* **Описание:** Округляет значение до ближайшего кратного `step` (при дробной части >= 0.5 округляет вверх).
 
-### 10.2. `frequency`
+**`_compute(self) -> pd.DataFrame`**
+* **Описание:** Основной метод расчёта бонусов.
+* **Логика:**
+  1. Агрегирует данные по `campaign` (медианы метрик, средний чек).
+  2. Нормализует метрики. Считает индексы:
+     * `need = 0.6 * r_norm + 0.4 * (1 - f_norm)` (потребность в стимулировании).
+     * `value = 0.6 * m_norm + 0.4 * f_norm` (ценность клиента).
+  3. Назначает бонус по правилам:
+     * Если категория одна и задан `single_category_bonus` -> фиксированный бонус.
+     * Если `max_bonus_points == 0` -> 0.
+     * Если `need <= need_free` -> 0 (высокая естественная активность).
+     * Если `value <= value_cut` и `r_norm >= 0.5` -> `max(step, churn_bonus)` (бонус последнего шанса при оттоке).
+     * Иначе -> `round_to_step(max * need * (0.5 + 0.5 * value), step)`, клипированный в `[step, max]`.
 
-Количество покупок клиента.
+**`clients(self) -> pd.DataFrame`**
+* **Описание:** Возвращает DataFrame клиентов с добавленными колонками `proposed_bonus` и `reason` (причина назначения бонуса).
 
-```text
-frequency = count(amount)
-```
-
----
-
-### 10.3. `total_amount`
-
-Сумма всех покупок клиента.
-
-```text
-total_amount = sum(amount)
-```
-
----
-
-### 10.4. `avg_amount`
-
-Средний чек клиента.
-
-```text
-avg_amount = mean(amount)
-```
+**`budget(self, response_rate: float = 0.1) -> float`**
+* **Описание:** Оценивает бюджет акции.
+* **Логика:** `sum(proposed_bonus * response_rate)` по всем клиентам.
 
 ---
 
-### 10.5. `monetary_score`
+## 6. Модуль `pipeline_areon.py` — Оркестрация пайплайна и отчётность
 
-Комбинированный показатель покупательской способности клиента.
+Модуль-оркестратор, который связывает все предыдущие этапы в единый пайплайн и формирует итоговый отчёт в формате словаря (для JSON/БД).
 
-Сначала нормируются:
+### Функция `build_bonus_report(...)`
 
-```text
-total_amount
-avg_amount
-frequency
-```
+**Параметры:**
+* `path_data` / `data` — источник данных.
+* `reference_date` — дата отсчёта.
+* `count_cat` — количество категорий (по умолчанию 3).
+* `method` — стратегия сегментации (по умолчанию `"win-back"`).
+* `max_bonus_points` (1000.0), `step` (50.0), `need_free`, `value_cut`, `churn_bonus` (50.0), `single_category_bonus` — параметры бонусной политики.
+* `include_client_ids` — включать ли списки ID клиентов в категории.
 
-Затем применяется формула:
+**Возвращает:** `Dict[str, Any]` — структурированный отчёт.
 
-```text
-monetary_score =
-    0.40 * total_norm +
-    0.40 * avg_norm +
-    0.20 * frequency_norm
-```
+**Внутренняя логика:**
+1. **Сборка пайплайна:** Последовательно создаёт `BusinessMetrics` -> `UserCategories` -> `BonusPolicy`.
+2. **Перехват предупреждений:** Все `UserWarning`, сгенерированные на этапах, собираются в список `warning_messages`.
+3. **Формирование `meta`:** Словарь с метаданными (дата генерации, параметры, формулы, предупреждения).
+4. **Формирование `categories`:** 
+   * Группирует клиентов по `campaign`.
+   * Для каждой категории считает средние метрики.
+   * **Важно:** Внутренняя колонка `campaign` маппится в выходное поле `segment_group` (для совместимости с БД/фронтендом).
+   * Поля `proposed_bonus` и `final_bonus` приводятся к `int`.
+5. **Формирование `clients`:** 
+   * Итерируется по клиентам, маппит `campaign` в `segment_group`.
+   * Добавляет метрики и назначенный бонус.
 
-Диапазон:
+### Функция `save_bonus_report(path: str, **kwargs) -> Dict[str, Any]`
 
-```text
-0.0 <= monetary_score <= 1.0
-```
-
----
-
-## 11. Матрица категорий
-
-Матрица строится из трёх уровней для каждого показателя:
-
-```text
-min
-mean
-max
-```
-
-Используются:
-
-```text
-recency
-frequency
-monetary_score
-```
-
-Итого:
-
-```text
-3 × 3 × 3 = 27 базовых групп
-```
-
-Если некоторые точки совпадают, дубликаты автоматически удаляются.
-
-Например, если все клиенты одинаковые, матрица может схлопнуться до одной группы.
+**Описание:** Обёртка над `build_bonus_report`.
+**Логика:** Вызывает `build_bonus_report`, сериализует результат в JSON-файл по указанному `path` и возвращает словарь.
 
 ---
 
-## 12. Приоритет категорий для `win-back`
-
-Для стратегии `win-back` высокий `recency` повышает приоритет.
-
-То есть:
-
-```text
-чем дольше клиент не покупал, тем выше приоритет возврата
-```
-
-Формула приоритета базовой группы:
-
-```text
-score =
-    0.60 * recency_norm +
-    0.10 * frequency_norm +
-    0.30 * monetary_norm
-```
-
-Где:
-
-```text
-recency_norm = 0 — клиент недавно был
-recency_norm = 1 — клиент давно не был
-```
-
-Категория `0` — самая приоритетная.
-
----
-
-## 13. Автоматическое уменьшение количества категорий
-
-Пользователь запрашивает:
-
-```python
-count_cat = N
-```
-
-Но уникальных групп может быть меньше, чем `N`.
-
-Например:
-
-```text
-запрошено 10 категорий
-уникальных групп только 7
-```
-
-Тогда код автоматически уменьшит количество категорий до `7` и напишет предупреждение.
-
-Также:
-
-- если `count_cat <= 0` — ошибка;
-- если данных нет — возвращается пустой результат с предупреждением;
-- если матрица схлопнулась в одну группу, все клиенты попадут в категорию `0`.
-
----
-
-## 14. Политика скидок
-
-### 14.1. Параметры по умолчанию
-
-```python
-max_discount = 30.0
-step = 5.0
-need_free = 0.25
-value_cut = 0.20
-churn_discount = 5.0
-```
-
----
-
-### 14.2. Ограничения
-
-| Условие | Поведение |
-|---|---|
-| `max_discount < 0` | ошибка |
-| `max_discount > 30` | разрешается, но пишется предупреждение |
-| `step <= 0` | ошибка |
-| `step > max_discount` | `step` уменьшается до `max_discount`, пишется предупреждение |
-| `single_category_discount < 0` | ошибка |
-| `single_category_discount > max_discount` | значение уменьшается до `max_discount`, пишется предупреждение |
-
----
-
-### 14.3. Минимальная скидка для стимулирования
-
-Минимальная положительная скидка равна:
-
-```text
-step
-```
-
-Пример:
-
-```text
-формула посчитала 1.2%
-step = 5%
-итоговая скидка = 5%
-```
-
----
-
-### 14.4. Если категория одна
-
-Если по итогу сегментации получилась только одна категория, все клиенты получают одну и ту же скидку.
-
-По умолчанию скидка рассчитывается по формуле.
-
-Но можно задать фиксированную скидку:
-
-```python
-DiscountPolicy(
-    uc,
-    max_discount=30.0,
-    step=5.0,
-    single_category_discount=10.0,
-)
-```
-
-Тогда все клиенты единственной категории получат:
-
-```text
-10.0%
-```
-
-Если:
-
-```python
-single_category_discount=None
-```
-
-используется формула.
-
----
-
-## 15. Логика расчёта скидки
-
-Для каждой категории рассчитываются медианные значения:
-
-```text
-recency
-frequency
-monetary_score
-```
-
-Затем они нормируются:
-
-```text
-r_norm — нормированный recency
-f_norm — нормированная частота
-m_norm — нормированный monetary_score
-```
-
-Далее рассчитываются:
-
-```text
-need = 0.6 * r_norm + 0.4 * (1 - f_norm)
-value = 0.6 * m_norm + 0.4 * f_norm
-```
-
-### 15.1. Скидка не нужна
-
-Если:
-
-```text
-need <= need_free
-```
-
-скидка равна:
-
-```text
-0
-```
-
-Причина:
-
-```text
-высокая естественная активность - скидка не нужна
-```
-
----
-
-### 15.2. Минимальная скидка последнего шанса
-
-Если:
-
-```text
-value <= value_cut
-r_norm >= 0.5
-```
-
-назначается минимальная скидка для отточного сегмента.
-
-Фактическое значение:
-
-```text
-max(step, churn_discount)
-```
-
-но не больше:
-
-```text
-max_discount
-```
-
-Причина:
-
-```text
-низкая ценность при оттоке - минимальная скидка последнего шанса
-```
-
----
-
-### 15.3. Основная формула скидки
-
-В остальных случаях:
-
-```text
-raw_discount =
-    max_discount * need * (0.5 + 0.5 * value)
-```
-
-Затем скидка округляется до шага:
-
-```text
-discount = round_to_step(raw_discount, step)
-```
-
-И ограничивается диапазоном:
-
-```text
-step <= discount <= max_discount
-```
-
-Причина:
-
-```text
-стимулирование спроса
-```
-
----
-
-## 16. Бюджет акции
-
-Бюджет рассчитывается от среднего чека:
-
-```text
-budget =
-    sum(
-        avg_amount * discount / 100 * response_rate
-    )
-```
-
-Пример:
-
-```python
-budget = dp.budget(response_rate=0.1)
-
-print(budget)
-```
-
-Где:
-
-```text
-response_rate = 0.1
-```
-
-означает ожидаемый отклик 10%.
-
----
-
-## 17. Итоговый JSON
-
-Функция:
-
-```python
-build_discount_report()
-```
-
-возвращает словарь вида:
-
-```json
-{
-  "meta": {},
-  "categories": [],
-  "clients": []
-}
-```
-
----
-
-### 17.1. Блок `meta`
-
-Пример:
-
-```json
-{
-  "generated_at": "2026-06-22T00:00:00",
-  "reference_date": "2026-06-22",
-  "method": "win-back",
-  "max_discount": 30.0,
-  "step": 5.0,
-  "requested_count_cat": 3,
-  "effective_count_cat": 3,
-  "monetary_formula": "0.40*total_norm + 0.40*avg_norm + 0.20*frequency_norm",
-  "score_formula": "0.60*recency_norm + 0.10*frequency_norm + 0.30*monetary_norm",
-  "budget_base": "avg_amount",
-  "warnings": []
-}
-```
-
----
-
-### 17.2. Блок `categories`
-
-Каждая категория содержит:
-
-```json
-{
-  "campaign": 0,
-  "label": "priority_0",
-  "discount": 25.0,
-  "reason": "стимулирование спроса",
-  "clients_count": 1200,
-  "avg_recency": 145.3,
-  "avg_frequency": 2.8,
-  "avg_monetary_score": 0.72,
-  "avg_amount": 1450.0,
-  "client_ids": [
-    "+79991234567",
-    "+79997654321"
-  ]
-}
-```
-
-Описание полей:
-
-| Поле | Описание |
-|---|---|
-| `campaign` | номер категории |
-| `label` | человекочитаемая метка категории |
-| `discount` | скидка для категории |
-| `reason` | причина назначения скидки |
-| `clients_count` | количество клиентов в категории |
-| `avg_recency` | средний `recency` клиентов категории |
-| `avg_frequency` | средняя частота покупок |
-| `avg_monetary_score` | средний показатель ценности |
-| `avg_amount` | средний чек |
-| `client_ids` | список идентификаторов клиентов |
-
-Если для категории не назначено ни одного клиента, она может присутствовать с полями:
-
-```json
-{
-  "clients_count": 0,
-  "client_ids": []
-}
-```
-
----
-
-### 17.3. Блок `clients`
-
-Каждый клиент содержит:
-
-```json
-{
-  "client_id": "+79991234567",
-  "campaign": 0,
-  "discount": 25.0,
-  "reason": "стимулирование спроса",
-  "recency": 52,
-  "frequency": 2,
-  "total_amount": 840.0,
-  "avg_amount": 420.0,
-  "monetary_score": 0.61
-}
-```
-
----
-
-## 18. Предупреждения
-
-Код использует стандартный механизм:
-
-```python
-warnings.warn()
-```
-
-Предупреждения собираются в:
-
-```json
-"meta": {
-  "warnings": []
-}
-```
-
-### Список возможных предупреждений
-
-| Событие | Текст или смысл |
-|---|---|
-| Будущие даты | Найдены покупки позже `reference_date`, они будут обрезаны |
-| Пропуски в данных | Строки с пустыми `client_id`, `purchase_date` или `amount` исключены |
-| `max_discount > 30` | Скидка больше стандартного лимита |
-| `step > max_discount` | Шаг уменьшен до `max_discount` |
-| `count_cat` уменьшен | Запрошено больше категорий, чем доступно уникальных групп |
-| `single_category_discount > max_discount` | Фиксированная скидка уменьшена до `max_discount` |
-| Клиенты без скидки | Для клиентов без назначенной скидки установлена скидка `0` |
-
----
-
-## 19. Ошибки
-
-| Ситуация | Поведение |
-|---|---|
-| Не передан источник данных | `ValueError` |
-| Отсутствуют обязательные колонки | `ValueError` |
-| Некорректная дата | `ValueError` |
-| Некорректный `amount` | `ValueError` |
-| `count_cat <= 0` | `ValueError` |
-| `step <= 0` | `ValueError` |
-| `max_discount < 0` | `ValueError` |
-| `single_category_discount < 0` | `ValueError` |
-| `churn_discount < 0` | `ValueError` |
-| Неизвестный метод | `ValueError` |
-| Данные есть, но не вызван `users_cat()` перед `DiscountPolicy` | `ValueError` |
-
----
-
-## 20. Пустые входные данные
-
-Если входные данные пусты:
-
-- код не падает молча;
-- возвращается пустой результат;
-- в `meta.warnings` добавляется предупреждение.
-
-Пример:
-
-```json
-{
-  "meta": {
-    "warnings": [
-      "Входные данные не содержат клиентов."
-    ]
-  },
-  "categories": [],
-  "clients": []
-}
-```
-
----
-
-## 21. Пример `main.py`
-
-```python
-import pandas as pd
-
-from pipeline import save_discount_report
-
-
-def main():
-    report = save_discount_report(
-        path="discount_report.json",
-        path_data="clients.csv",
-        count_cat=3,
-        max_discount=30.0,
-        step=5.0,
-    )
-
-    print("Отчёт сохранён в файл: discount_report.json")
-    print("Количество категорий:", len(report["categories"]))
-    print("Количество клиентов:", len(report["clients"]))
-    print("Предупреждения:", report["meta"]["warnings"])
-
-
-if __name__ == "__main__":
-    main()
-```
-
-Запуск:
-
-```bash
-python main.py
-```
-
----
-
-## 22. Расширение маркетинговых стратегий
-
-Сейчас явно поддерживается стратегия:
-
-```python
-"win-back"
-```
-
-Архитектура позволяет добавлять новые стратегии.
-
-Пример регистрации новой стратегии:
-
-```python
-from user_categories import UserCategories
-
-UserCategories.register_strategy(
-    name="upsell",
-    weights=(0.20, 0.30, 0.50),
-    recency_higher_is_better=False,
-)
-```
-
-После этого можно использовать:
-
-```python
-uc = UserCategories(
-    path_to_data="clients.csv",
-    method="upsell",
-)
-```
-
-Параметр:
-
-```python
-recency_higher_is_better
-```
-
-определяет, повышает ли высокий `recency` приоритет.
-
-Для `win-back`:
-
-```python
-recency_higher_is_better=True
-```
-
-Для стратегий типа `upsell`, вероятно, потребуется:
-
-```python
-recency_higher_is_better=False
-```
-
-или отдельная более сложная логика.
-
----
-
-## 23. Миграция со старых имён
-
-Ранее файлы назывались:
-
-```text
-Bisness_metrics.py
-Catigories_users.py
-DiscontPolicy.py
-```
-
-Новые имена:
-
-```text
-business_metrics.py
-user_categories.py
-discount_policy.py
-```
-
-Старые классы:
-
-```text
-Bisness_metrics
-Сatigories_users
-DiscountPolicy
-```
-
-Новые классы:
-
-```text
-BusinessMetrics
-UserCategories
-DiscountPolicy
-```
-
-Актуальный импорт:
-
-```python
-from business_metrics import BusinessMetrics
-from user_categories import UserCategories
-from discount_policy import DiscountPolicy
-from pipeline import build_discount_report, save_discount_report
-```
-
----
-
-## 24. Рекомендации по эксплуатации
-
-1. Всегда сохраняйте исходный файл с данными.
-2. Используйте фиксированный `reference_date` для воспроизводимых отчётов.
-3. Проверяйте `meta.warnings` после каждого запуска.
-4. При большом количестве клиентов можно отключить включение `client_ids` в категории:
-
-```python
-build_discount_report(
-    path_data="clients.csv",
-    include_client_ids=False,
-)
-```
-
-5. Перед запуском акции проверяйте:
-   - количество категорий;
-   - распределение клиентов;
-   - распределение скидок;
-   - прогноз бюджета.
-
----
-
-## 25. Итоговая схема работы
-
-```text
-1. Загрузка данных
-   client_id, purchase_date, amount
-
-2. Предобработка
-   - client_id как строка
-   - дата как datetime
-   - amount как число
-   - будущие даты клипятся до reference_date
-   - пустые строки исключаются с предупреждением
-
-3. Расчёт клиентских метрик
-   - recency
-   - frequency
-   - total_amount
-   - avg_amount
-   - monetary_score
-
-4. Построение матрицы сегментов
-   - 27 базовых групп
-   - удаление дубликатов
-   - расчёт score
-   - сортировка по приоритету
-
-5. Назначение клиентов на группы
-   - ближайшая группа по нормированным метрикам
-
-6. Разбиение групп на маркетинговые категории
-   - категория 0 — самая приоритетная
-   - автоматическое уменьшение числа категорий при необходимости
-
-7. Расчёт скидки
-   - по правилам DiscountPolicy
-   - с ограничениями и предупреждениями
-
-8. Выгрузка результата
-   - categories
-   - clients
-   - meta
-```
+## 7. Архитектура и поток данных
+
+```mermaid
+graph TD
+    A[Сырые данные / CSV] --> B(ColumnFinder<br/>loader.py)
+    B --> C(Preprocessor<br/>predprocessing.py)
+    C --> D(BusinessMetrics<br/>business_metrics.py)
+    D --> E(UserCategories<br/>user_categories.py)
+    E --> F(BonusPolicy<br/>bonus_policy.py)
+    F --> G(build_bonus_report<br/>pipeline_areon.py)
+    G --> H[Итоговый JSON / Отчёт]
+
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style H fill:#bbf,stroke:#333,stroke-width:2px
