@@ -82,12 +82,24 @@ class Preprocessor:
                 errors="coerce"
             )
         else:
-            parsed_date = pd.to_datetime(
-                date,
-                format="mixed",
-                dayfirst=True,
-                errors="coerce"
-            )
+            # ISO format datetime with T separator (e.g., "2026-04-05T10:30:00+03:00")
+            # Parse without dayfirst to preserve YYYY-MM-DD interpretation
+            if "T" in date:
+                parsed_date = pd.to_datetime(
+                    date,
+                    format="mixed",
+                    dayfirst=False,
+                    errors="coerce"
+                )
+            else:
+                # For other formats (DD.MM.YYYY, DD-MM-YYYY, YYYY-MM-DD without T),
+                # use dayfirst=True as before
+                parsed_date = pd.to_datetime(
+                    date,
+                    format="mixed",
+                    dayfirst=True,
+                    errors="coerce"
+                )
 
         if pd.isna(parsed_date):
             return None

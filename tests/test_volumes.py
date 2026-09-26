@@ -70,9 +70,6 @@ async def test_upload_large_dataset_performance(client, generate_csv, db_session
     
     campaign_id = response.json()["campaign_id"]
     
-    # Воркер обработает это дольше, но мы просто проверим, что задача ушла в БД
-    from src.DB.database import async_session
-    from src.DB.models import Campaign
-    async with async_session() as db:
-        camp = await db.get(Campaign, campaign_id)
-        assert camp.status == CampaignStatus.PROCESSING
+    # Проверяем статус через API (SQLite не поддерживает UUID нативно для прямого запроса)
+    response_status = await client.get(f"/api/v1/campaigns/{campaign_id}/status")
+    assert response_status.json()["status"] == "PROCESSING"

@@ -67,20 +67,19 @@ async def test_cannot_edit_approved_campaign(client, generate_csv, db_session):
     from src.worker import process_csv_task
     await process_csv_task({}, campaign_id, file_path)
     
-    # Сначала одобряем
-    await client.post(f"/api/v1/campaigns/{campaign_id}/approve")
-    
-    # Получаем ID категории
+    # Получаем ID категории ДО одобрения (после одобрения эндпоинт категорий вернет 400)
     resp_cats = await client.get(f"/api/v1/campaigns/{campaign_id}/categories")
     cat_id = resp_cats.json()["categories"][0]["id"]
     
-    # Пытаемся редактировать
+    # Сначала одобряем
+    await client.post(f"/api/v1/campaigns/{campaign_id}/approve")
+    
+    # Пытаемся редактировать после одобрения
     resp_patch = await client.patch(
         f"/api/v1/campaigns/{campaign_id}/categories/{cat_id}",
         json={"final_bonus": 999}
     )
     
-    # Эндпоинт может вернуть 200, но бизнес-логика должна это запретить, 
-    # либо мы добавим проверку в api.py. Пока проверим, что статус кампании не сбился.
+    # Проверяем, что статус кампании не сбился (остался APPROVED)
     resp_status = await client.get(f"/api/v1/campaigns/{campaign_id}/status")
     assert resp_status.json()["status"] == "APPROVED"

@@ -104,6 +104,9 @@ class ColumnFinder:
 
         Возвращает:
             str: название лучшей колонки.
+            
+        Raises:
+            ValueError: если нет кандидатов или лучший score равен 0.
         """
 
         candidates = self.find_columns(keywords)
@@ -121,7 +124,13 @@ class ColumnFinder:
         for column, score in scores.items():
             print(f"{column}: {score:.2f}")
 
-        return max(scores, key=scores.get)
+        best_column = max(scores, key=scores.get)
+        best_score = scores[best_column]
+        
+        if best_score <= 0:
+            raise ValueError("Подходящая колонка не найдена (нет валидных данных)")
+        
+        return best_column
 
     def find_phone_column(self) -> str:
         """
@@ -262,7 +271,7 @@ class ColumnFinder:
                 return 0.0
 
             numeric_values = pd.to_numeric(
-                values.astype(str).str.replace(",", ".", regex=False),
+                values.astype(str).str.replace(" ", "", regex=False).str.replace(",", ".", regex=False),
                 errors="coerce"
             )
 
