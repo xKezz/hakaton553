@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Iterable
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -215,9 +215,9 @@ async def get_all_purchases(
     session: AsyncSession,
 ) -> list[Purchase]:
     result = await session.execute(
-        select(Purchase).order_by(
-            Purchase.purchase_date
-        )
+        select(Purchase)
+        .options(selectinload(Purchase.client))
+        .order_by(Purchase.purchase_date)
     )
 
     return list(result.scalars().all())
