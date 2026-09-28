@@ -1,0 +1,11 @@
+def test_core_modules_import():
+    import src.pipeline
+    import src.DB.crud
+    import src.DB.database
+    import src.DB.models
+    import src.data_process.loader
+    import src.data_process.predprocessing
+    import src.segmentation.business_metrics
+    import src.segmentation.user_categories
+    import src.segmentation.full_categorised
+    import src.recommendations.bonus_policy
