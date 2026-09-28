@@ -14,7 +14,24 @@ class ColumnFinder:
         "number": 2,
         "номер": 2
     }
-
+    PURCHASE_ID_KEYWORDS = {
+        "purchase_id": 10,
+        "purchase id": 10,
+        "transaction_id": 10,
+        "transaction id": 10,
+        "order_id": 10,
+        "order id": 10,
+        "receipt_id": 10,
+        "receipt id": 10,
+        "operation_id": 10,
+        "operation id": 10,
+        "external_id": 9,
+        "external id": 9,
+        "номер операции": 10,
+        "номер заказа": 9,
+        "номер чека": 9,
+        "номер транзакции": 8,
+    }
     DATE_KEYWORDS = {
         "дата покупки": 10,
         "purchase_date": 10,
@@ -179,7 +196,44 @@ class ColumnFinder:
         print(f"\nКолонка с номером телефона: {phone_column}")
 
         return phone_column
+    def find_purchase_id_column(self) -> str:
+        """Находит колонку с уникальным ID покупки."""
 
+        def purchase_id_score(column: str) -> float:
+            values = self.df[column].dropna().astype(str).str.strip()
+
+            if values.empty:
+                return 0.0
+
+            valid_ratio = (values != "").mean()
+            unique_ratio = values.nunique() / len(values)
+
+            column_name = self.normalize_column_name(column)
+
+            keyword_score = max(
+                (
+                    score
+                    for keyword, score in self.PURCHASE_ID_KEYWORDS.items()
+                    if self.normalize_column_name(keyword) in column_name
+                ),
+                default=0,
+            )
+
+            return float(
+                keyword_score
+                * valid_ratio
+                * unique_ratio
+            )
+
+        purchase_id_column = self.find_best_column(
+            list(self.PURCHASE_ID_KEYWORDS.keys()),
+            purchase_id_score
+        )
+
+        print(f"\nКолонка с ID покупки: {purchase_id_column}")
+
+        return purchase_id_column
+    
     def find_date_column(self) -> str:
         """
         Находит целевую колонку с датой.

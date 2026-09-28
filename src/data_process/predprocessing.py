@@ -57,7 +57,34 @@ class Preprocessor:
             self.normalize_phone,
             default_region=self.default_region
         )
+    @staticmethod
+    def normalize_purchase_id(purchase_id) -> str | None:
+        """Приводит ID покупки к строке."""
 
+        if pd.isna(purchase_id):
+            return None
+
+        purchase_id = str(purchase_id).strip()
+
+        if not purchase_id:
+            return None
+
+        # Например, pandas мог прочитать 12345 как 12345.0
+        if purchase_id.endswith(".0"):
+            integer_part = purchase_id[:-2]
+
+            if integer_part.isdigit():
+                purchase_id = integer_part
+
+        return purchase_id
+
+
+    def process_purchase_id_column(self, column: str) -> pd.Series:
+        """Нормализует колонку с ID покупки."""
+
+        return self.df[column].apply(
+            self.normalize_purchase_id
+        )
     @staticmethod
     def normalize_date(date: str) -> str | None:
         """
