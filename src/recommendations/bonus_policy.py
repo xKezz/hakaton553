@@ -4,7 +4,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from segmentation.business_metrics import normalize_series
+from src.segmentation.business_metrics import normalize_series
 
 class BonusPolicy:
     """

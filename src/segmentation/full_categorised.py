@@ -5,9 +5,9 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 import pandas as pd
 
-from segmentation.business_metrics import BusinessMetrics
-from recommendations.bonus_policy import BonusPolicy
-from segmentation.user_categories import UserCategories
+from src.segmentation.business_metrics import BusinessMetrics
+from src.recommendations.bonus_policy import BonusPolicy
+from src.segmentation.user_categories import UserCategories
 
 def build_bonus_report(
     path_data: Optional[str] = None,

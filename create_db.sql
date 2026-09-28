@@ -12,7 +12,7 @@
 CREATE TABLE client (
     id              BIGSERIAL PRIMARY KEY,
     phone_e164      VARCHAR(20) NOT NULL UNIQUE,
-    max_user_id     VARCHAR(100) NOT NULL UNIQUE,
+    max_user_id     VARCHAR(100) UNIQUE,
     notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -56,7 +56,7 @@ CREATE TABLE campaign (
     at_risk_clients     INTEGER NOT NULL DEFAULT 0
                         CHECK (at_risk_clients >= 0),
 
-    config              JSONB,
+    config              JSON,
 
     created_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 

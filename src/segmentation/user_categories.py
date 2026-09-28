@@ -5,7 +5,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from segmentation.business_metrics import BusinessMetrics, normalize_series
+from src.segmentation.business_metrics import BusinessMetrics, normalize_series
 
 METRIC_COLS = ["recency", "frequency", "monetary_score"]
 

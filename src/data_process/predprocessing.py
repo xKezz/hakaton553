@@ -85,14 +85,11 @@ class Preprocessor:
         return self.df[column].apply(
             self.normalize_purchase_id
         )
+    
     @staticmethod
     def normalize_date(date: str) -> str | None:
         """
         Приводит дату к формату YYYY-MM-DD.
-
-        Возвращает:
-            str | None: нормализованную дату или None,
-            если значение не удалось распознать.
         """
         if pd.isna(date):
             return None
@@ -102,37 +99,18 @@ class Preprocessor:
         if not date:
             return None
 
-        if date.isdigit() and len(date) == 8:
-            parsed_date = pd.to_datetime(
-                date,
-                format="%Y%m%d",
-                errors="coerce"
-            )
-        else:
-            # ISO format datetime with T separator (e.g., "2026-04-05T10:30:00+03:00")
-            # Parse without dayfirst to preserve YYYY-MM-DD interpretation
-            if "T" in date:
-                parsed_date = pd.to_datetime(
-                    date,
-                    format="mixed",
-                    dayfirst=False,
-                    errors="coerce"
-                )
-            else:
-                # For other formats (DD.MM.YYYY, DD-MM-YYYY, YYYY-MM-DD without T),
-                # use dayfirst=True as before
-                parsed_date = pd.to_datetime(
-                    date,
-                    format="mixed",
-                    dayfirst=True,
-                    errors="coerce"
-                )
+        parsed_date = pd.to_datetime(
+            date,
+            format="mixed",
+            dayfirst=False,
+            errors="coerce"
+        )
 
         if pd.isna(parsed_date):
             return None
 
         return parsed_date.strftime("%Y-%m-%d")
-
+    
     def process_date_column(self, column: str) -> pd.Series:
         """
         Нормализует значения указанной колонки с датами.
