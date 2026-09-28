@@ -37,6 +37,5 @@ def test_campaign_schema():
 
 
 def test_campaign_target_schema():
-    assert CampaignTarget.__table__.c.client_id.nullable is True
-    assert CampaignTarget.__table__.c.max_user_id.nullable is True
-    assert CampaignTarget.__table__.c.notification_status.nullable is False
+    assert CampaignTarget.__table__.c.client_id.nullable is False
+

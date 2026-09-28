@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta
 
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,8 @@ from src.segmentation.full_categorised import build_bonus_report
 
 
 class Pipeline:
+    DEFAULT_CAMPAIGN_DAYS = 30
+
     def __init__(
         self,
         df: pd.DataFrame,
@@ -25,10 +28,12 @@ class Pipeline:
     ):
         self.df = df.copy()
         self.default_region = default_region
+
         self.preprocessor = Preprocessor(
             self.df,
             default_region,
         )
+
         self.column_finder = ColumnFinder(
             self.df
         )
@@ -37,6 +42,10 @@ class Pipeline:
         self._phone_col = None
         self._date_col = None
         self._amount_col = None
+
+    # =====================================================
+    # COLUMN DETECTION
+    # =====================================================
 
     def _find_columns(self):
         self._purchase_id_col = (
@@ -78,6 +87,10 @@ class Pipeline:
             raise ValueError(
                 "Колонка с суммами не найдена."
             )
+
+    # =====================================================
+    # PREPROCESSING
+    # =====================================================
 
     def predprocess(self) -> pd.DataFrame:
         if not self._purchase_id_col:
@@ -128,6 +141,10 @@ class Pipeline:
 
         return self.df
 
+    # =====================================================
+    # HISTORY FROM DB
+    # =====================================================
+
     @staticmethod
     def _purchases_to_dataframe(
         purchases,
@@ -150,14 +167,46 @@ class Pipeline:
             ]
         )
 
+    # =====================================================
+    # MAIN PIPELINE
+    # =====================================================
+
     async def run(
         self,
         session: AsyncSession,
-        source_file_path: str = None,
-        output_path: str = None,
+        source_file_path: str | None = None,
+        output_path: str | None = None,
+        campaign_days: int = DEFAULT_CAMPAIGN_DAYS,
+        campaign_ends_at: datetime | None = None,
         **kwargs,
     ) -> dict:
+
+        # -------------------------------------------------
+        # 1. Определяем срок действия кампании
+        # -------------------------------------------------
+
+        if campaign_ends_at is None:
+            if campaign_days <= 0:
+                raise ValueError(
+                    "campaign_days должен быть больше нуля."
+                )
+
+            campaign_ends_at = (
+                datetime.utcnow()
+                + timedelta(
+                    days=campaign_days
+                )
+            )
+
+        # -------------------------------------------------
+        # 2. Предобработка CSV
+        # -------------------------------------------------
+
         clean_df = self.predprocess()
+
+        # -------------------------------------------------
+        # 3. Сохраняем новые покупки
+        # -------------------------------------------------
 
         await save_purchases(
             session,
@@ -165,6 +214,10 @@ class Pipeline:
                 orient="records"
             ),
         )
+
+        # -------------------------------------------------
+        # 4. Получаем всю накопленную историю
+        # -------------------------------------------------
 
         purchases = await get_all_purchases(
             session
@@ -176,11 +229,20 @@ class Pipeline:
             )
         )
 
+        # -------------------------------------------------
+        # 5. Аналитика + 5 категорий + бонусы
+        # -------------------------------------------------
+
         report = build_bonus_report(
             data=history_df,
             count_cat=5,
             **kwargs,
         )
+
+        # -------------------------------------------------
+        # 6. Считаем количество клиентов
+        #    групп 0–3
+        # -------------------------------------------------
 
         at_risk_clients = sum(
             category["clients_count"]
@@ -190,6 +252,10 @@ class Pipeline:
             ) < 4
         )
 
+        # -------------------------------------------------
+        # 7. Создаём кампанию
+        # -------------------------------------------------
+
         campaign = await create_campaign(
             session,
             source_file_path=source_file_path,
@@ -198,7 +264,12 @@ class Pipeline:
                 report["clients"]
             ),
             at_risk_clients=at_risk_clients,
+            campaign_ends_at=campaign_ends_at,
         )
+
+        # -------------------------------------------------
+        # 8. Сохраняем 5 категорий
+        # -------------------------------------------------
 
         saved_categories = (
             await create_campaign_categories(
@@ -213,6 +284,10 @@ class Pipeline:
             for category in saved_categories
         }
 
+        # -------------------------------------------------
+        # 9. Формируем targets
+        # -------------------------------------------------
+
         targets = []
 
         for client_data in report["clients"]:
@@ -220,7 +295,17 @@ class Pipeline:
                 client_data["segment_group"]
             )
 
+            # Группа 4 — стабильные клиенты.
             if segment_group >= 4:
+                continue
+
+            category = category_by_group[
+                str(segment_group)
+            ]
+
+            # Нулевые бонусы в campaign_target
+            # не сохраняем.
+            if int(category.final_bonus) <= 0:
                 continue
 
             client = await get_client_by_phone(
@@ -235,34 +320,40 @@ class Pipeline:
                     f"не найден в БД."
                 )
 
-            category = category_by_group[
-                str(segment_group)
-            ]
-
             targets.append(
                 {
                     "campaign_id": campaign.id,
                     "category_id": category.id,
                     "client_id": client.id,
-                    "phone_e164": client.phone_e164,
-                    "max_user_id": client.max_user_id,
-                    "recency": client_data["recency"],
-                    "frequency": client_data["frequency"],
-                    "monetary_score": (
-                        client_data["monetary_score"]
-                    ),
-                    "avg_amount": client_data["avg_amount"],
-                    "bonus_amount": (
-                        category.final_bonus
-                    ),
-                    "notification_status": "PENDING",
+                    "recency": client_data[
+                        "recency"
+                    ],
+                    "frequency": client_data[
+                        "frequency"
+                    ],
+                    "monetary_score": client_data[
+                        "monetary_score"
+                    ],
+                    "avg_amount": client_data[
+                        "avg_amount"
+                    ],
+                    "bonus_amount": category.final_bonus,
+                    "bonus_realised": None,
                 }
             )
+
+        # -------------------------------------------------
+        # 10. Сохраняем targets
+        # -------------------------------------------------
 
         await create_campaign_targets(
             session,
             targets,
         )
+
+        # -------------------------------------------------
+        # 11. Кампания готова к запуску
+        # -------------------------------------------------
 
         await update_campaign_status(
             session,
@@ -272,6 +363,13 @@ class Pipeline:
 
         report["campaign_id"] = campaign.id
         report["status"] = "DRAFT"
+        report["campaign_ends_at"] = (
+            campaign_ends_at.isoformat()
+        )
+
+        # -------------------------------------------------
+        # 12. Сохраняем JSON-отчёт
+        # -------------------------------------------------
 
         if output_path:
             with open(

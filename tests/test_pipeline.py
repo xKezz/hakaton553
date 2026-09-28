@@ -99,7 +99,7 @@ async def test_pipeline_full_flow(session, make_sample_raw_df, tmp_path):
     )
 
     assert all(
-        target.notification_status == "PENDING"
+        target.bonus_realised is None
         for target in targets
     )
 

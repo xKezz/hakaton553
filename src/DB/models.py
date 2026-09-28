@@ -3,15 +3,14 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
-    Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
+    JSON,
     Numeric,
     String,
     Text,
-    Index,
-    JSON,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,13 +29,6 @@ class CampaignStatus(str, enum.Enum):
     DRAFT = "DRAFT"
     APPROVED = "APPROVED"
     COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-
-
-class NotificationStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    SENT = "SENT"
-    NOT_REGISTERED = "NOT_REGISTERED"
     FAILED = "FAILED"
 
 
@@ -65,12 +57,6 @@ class Client(Base):
         nullable=True,
     )
 
-    notifications_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        default=True,
-        nullable=False,
-    )
-
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
@@ -84,6 +70,7 @@ class Client(Base):
 
     campaign_targets: Mapped[list["CampaignTarget"]] = relationship(
         back_populates="client",
+        cascade="all, delete-orphan",
     )
 
 
@@ -192,15 +179,15 @@ class Campaign(Base):
         nullable=True,
     )
 
-    created_at: Mapped[datetime] = mapped_column(
+    launched_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
         nullable=False,
     )
 
-    approved_at: Mapped[datetime | None] = mapped_column(
+    campaign_ends_at: Mapped[datetime] = mapped_column(
         DateTime,
-        nullable=True,
+        nullable=False,
     )
 
     categories: Mapped[list["CampaignCategory"]] = relationship(
@@ -283,11 +270,6 @@ class CampaignCategory(Base):
         nullable=False,
     )
 
-    reason: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
-    )
-
     campaign: Mapped["Campaign"] = relationship(
         back_populates="categories",
     )
@@ -334,22 +316,12 @@ class CampaignTarget(Base):
         nullable=False,
     )
 
-    client_id: Mapped[int | None] = mapped_column(
+    client_id: Mapped[int] = mapped_column(
         ForeignKey(
             "client.id",
-            ondelete="SET NULL",
+            ondelete="CASCADE",
         ),
-        nullable=True,
-    )
-
-    phone_e164: Mapped[str] = mapped_column(
-        String(20),
         nullable=False,
-    )
-
-    max_user_id: Mapped[str | None] = mapped_column(
-        String(100),
-        nullable=True,
     )
 
     recency: Mapped[int | None] = mapped_column(
@@ -378,16 +350,9 @@ class CampaignTarget(Base):
         nullable=False,
     )
 
-    notification_status: Mapped[str] = mapped_column(
-        String(30),
-        default=NotificationStatus.PENDING.value,
-        nullable=False,
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
-        nullable=False,
+    bonus_realised: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
 
     campaign: Mapped["Campaign"] = relationship(
@@ -398,7 +363,7 @@ class CampaignTarget(Base):
         back_populates="targets",
     )
 
-    client: Mapped["Client | None"] = relationship(
+    client: Mapped["Client"] = relationship(
         back_populates="campaign_targets",
     )
 
