@@ -105,7 +105,21 @@ src/services/loyalty_mock.py   CSV-эмулятор программы лоял�
 ---
 
 ## 4. Запуск всех локальных компонентов одной командой через Docker
+### Linux:
 
+```bash
+cp .env.example .env      # обязательно заполните MAX_BOT_TOKEN и ADMIN_IDS
+sudo docker compose up -d
+```
+
+Проверка состояния и логи:
+
+```bash
+sudo docker compose ps
+sudo docker compose logs -f bot
+```
+
+### Windows PowerShell:
 ```bash
 cp .env.example .env      # обязательно заполните MAX_BOT_TOKEN и ADMIN_IDS
 docker compose up -d
@@ -117,7 +131,6 @@ docker compose up -d
 docker compose ps
 docker compose logs -f bot
 ```
-
 ---
 
 ## 5. Необходимые параметры окружения
@@ -290,13 +303,13 @@ cp .env.example .env
 **Шаг 3. Запустить все локальные компоненты одной командой**
 
 ```bash
-docker compose up -d
+sudo docker compose up -d
 ```
 
 PostgreSQL со схемой и бот поднимаются автоматически. Логи бота:
 
 ```bash
-docker compose logs -f bot
+sudo docker compose logs -f bot
 ```
 
 **Шаг 4. Открыть бота в MAX** и отправить `/start`. Вы администратор →
@@ -319,7 +332,7 @@ docker compose logs -f bot
 быстрой проверки задайте конец кампании в прошлом прямо в контейнере:
 
 ```bash
-docker compose exec db psql -U postgres -d winback_db \
+sudo docker compose exec db psql -U postgres -d winback_db \
   -c "UPDATE campaign SET campaign_ends_at = now() - interval '1 minute'
       WHERE status = 'APPROVED';"
 ```
@@ -338,7 +351,7 @@ docker compose exec db psql -U postgres -d winback_db \
 
 ### Альтернатива: локальный запуск через `setup.sh`
 
-Если Docker недоступен, проект разворачивается на самой машине:
+Если Docker недоступен, проект разворачивается:
 
 ```bash
 ./setup.sh
