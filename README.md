@@ -109,7 +109,7 @@ src/services/loyalty_mock.py   CSV-эмулятор программы лоял�
 
 Первый запуск для меню пользователя:
 ```bash
-cp .env.example .env      # обязательно заполните MAX_BOT_TOKEN!!!
+cp .env.example .env      # обязательно заполните MAX_BOT_TOKEN и DATABASE_URL!!!
 sudo docker compose up -d
 ```
 
@@ -117,7 +117,7 @@ sudo docker compose up -d
 
 Первый запуск для меню пользователя:
 ```bash
-cp .env.example .env      # обязательно заполните MAX_BOT_TOKEN!!!
+cp .env.example .env      # обязательно заполните MAX_BOT_TOKEN и DATABASE_URL!!!
 docker compose up -d
 ```
 
@@ -288,7 +288,7 @@ Python 3.12. Полный список с зафиксированными ве�
 cp .env.example .env
 ```
 
-**Шаг 2. Заполнить `.env`** - `MAX_BOT_TOKEN`. В `.env.example` - значения-заглушки.
+**Шаг 2. Заполнить `.env`** - `MAX_BOT_TOKEN` и DATABASE_URL! В `.env.example` - значения-заглушки.
 
 **Шаг 3. Запустить все локальные компоненты одной командой**
 
