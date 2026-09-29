@@ -1227,8 +1227,8 @@ async def test_build_campaign_report_none_realised(env) -> None:
     assert _report_value(report, "Целевых клиентов") == (
         "Целевых клиентов (targets): 3"
     )
-    assert _report_value(report, "Доставляемо") == (
-        "Доставляемо (есть MAX user_id): 3"
+    assert _report_value(report, "Доставлено") == (
+        "Доставлено (есть MAX user_id): 3"
     )
     assert _report_value(report, "Реализовали бонус") == (
         "Реализовали бонус: 0"
@@ -1258,8 +1258,8 @@ async def test_build_campaign_report_undeliverable_target(env) -> None:
     assert _report_value(report, "Целевых клиентов") == (
         "Целевых клиентов (targets): 3"
     )
-    assert _report_value(report, "Доставляемо") == (
-        "Доставляемо (есть MAX user_id): 2"
+    assert _report_value(report, "Доставлено") == (
+        "Доставлено (есть MAX user_id): 2"
     )
     assert _report_value(report, "Реализовали бонус") == (
         "Реализовали бонус: 0"

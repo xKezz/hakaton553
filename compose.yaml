@@ -1,0 +1,57 @@
+# Запуск всех локальных компонентов решения одной командой:
+#
+#     docker compose up -d
+#
+# ВАЖНО: src/DB/database.py пока жёстко использует
+# postgres:postgres@localhost:5432/winback_db, поэтому контейнер бота
+# работает в host-сети и обращается к порту PostgreSQL, опубликованному
+# на loopback хоста. Подробности и ограничения — в README.
+
+services:
+  # PostgreSQL — постоянное хранилище истории покупок и кампаний.
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: winback_db
+    ports:
+      # Только loopback: БД не торчит в локальную сеть.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Схема применяется автоматически при первой инициализации БД.
+      - ./create_db.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d winback_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # Бот MAX: принимает CSV, считает аналитику, ведёт кампании,
+  # эмулирует программу лояльности через CSV.
+  bot:
+    build: .
+    # localhost внутри контейнера должен указывать на хост —
+    # так требует текущая строка подключения в src/DB/database.py.
+    network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # CSV бизнеса, журнал эмулятора и снапшоты балансов.
+      - ./data:/app/data
+    environment:
+      MAX_BOT_TOKEN: ${MAX_BOT_TOKEN:-test_token_for_dev}
+      ADMIN_IDS: ${ADMIN_IDS:-}
+      LOYALTY_MOCK_DIR: ${LOYALTY_MOCK_DIR:-/app/data/loyalty_mock}
+      CAMPAIGN_DAYS: ${CAMPAIGN_DAYS:-30}
+      CAMPAIGN_FINISH_CHECK_INTERVAL: ${CAMPAIGN_FINISH_CHECK_INTERVAL:-60}
+      CAMPAIGN_SEND_DELAY_SECONDS: ${CAMPAIGN_SEND_DELAY_SECONDS:-0.05}
+      MAX_CSV_SIZE_BYTES: ${MAX_CSV_SIZE_BYTES:-20971520}
+      MAX_CSV_ROWS: ${MAX_CSV_ROWS:-30000}
+    restart: unless-stopped
+
+volumes:
+  pgdata:

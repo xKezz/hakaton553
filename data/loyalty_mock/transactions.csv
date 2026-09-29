@@ -1,4 +1,0 @@
-tx_id,ts,phone_e164,op,amount,campaign_id,target_id,note
-acc-4-11278,2026-09-29T07:54:23,+79083010049,ACCRUAL,100,4,11278,"{""recency"": 28, ""frequency"": 6, ""avg_amount"": 2116.67, ""issued_at"": ""2026-09-29T07:54:23"", ""ends_at"": ""2026-10-29T07:53:48""}"
-acc-5-16080,2026-09-29T08:18:21,+79083010049,ACCRUAL,100,5,16080,"{""recency"": 28, ""frequency"": 6, ""avg_amount"": 2116.67, ""issued_at"": ""2026-09-29T08:18:20"", ""ends_at"": ""2026-10-29T08:17:12""}"
-rev-5-16080,2026-09-29T14:33:18,+79083010049,REVOKE,-100,5,16080,revoke
