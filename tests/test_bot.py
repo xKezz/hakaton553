@@ -360,6 +360,40 @@ def spawned(monkeypatch) -> list[tuple[str, Any]]:
     return items
 
 
+def _keyboard_payloads(markup: Any) -> list[Any]:
+    """Достаёт payload'ы кнопок из разметки клавиатуры (fallback и maxapi)."""
+
+    if isinstance(markup, dict):
+        buttons = markup.get("buttons")
+    else:
+        buttons = getattr(getattr(markup, "payload", None), "buttons", None)
+
+    payloads: list[Any] = []
+
+    for row in buttons or []:
+        for button in row:
+            payloads.append(getattr(button, "payload", None))
+
+    return payloads
+
+
+def _keyboard_texts(markup: Any) -> list[Any]:
+    """Достаёт тексты кнопок из разметки клавиатуры."""
+
+    if isinstance(markup, dict):
+        buttons = markup.get("buttons")
+    else:
+        buttons = getattr(getattr(markup, "payload", None), "buttons", None)
+
+    texts: list[Any] = []
+
+    for row in buttons or []:
+        for button in row:
+            texts.append(getattr(button, "text", None))
+
+    return texts
+
+
 # =========================================================
 # 2. Хелперы для работы с БД
 # =========================================================
@@ -1859,13 +1893,21 @@ async def test_admin_bonus_stale_category_rejected(env) -> None:
 
 
 async def test_admin_send_on_draft_notifies(env, spawned) -> None:
-    """Рассылка DRAFT-кампании не стартует, админ получает статус."""
+    """Кнопка «Отправить предложения» удалена, payload adm:send отключён."""
 
     campaign_id = await _ingest(env)
 
     campaign = await _campaign(env, campaign_id)
     assert campaign.status == CampaignStatus.DRAFT.value
     assert spawned == []
+
+    # В меню нет кнопки повторной рассылки, но есть выгрузка истории.
+    payloads = _keyboard_payloads(bot_module.admin_menu_keyboard(campaign_id))
+    assert not any(str(item).startswith("adm:send") for item in payloads)
+    assert "adm:export" in payloads
+    assert not any("Отправить предложения" in str(t) for t in _keyboard_texts(
+        bot_module.admin_menu_keyboard(campaign_id)
+    ))
 
     event = FakeCallbackEvent(f"adm:send:{campaign_id}", user_id=7)
     context = RecordingContext()
@@ -1883,11 +1925,113 @@ async def test_admin_send_on_draft_notifies(env, spawned) -> None:
     assert not (campaign.config or {}).get("offers_sent")
 
     notification = event.edits[-1].get("notification") or ""
-    assert "Сначала запустите кампанию" in notification
+    assert "недоступно" in notification.lower()
     assert "Рассылка запущена" not in notification
     assert "Рассылка запущена" not in event.acked
-    # Карточка кампании перерисована.
-    assert f"Кампания #{campaign_id}" in event.edits[-1]["text"]
+
+
+async def test_category_block_fields(env) -> None:
+    """После загрузки CSV в категориях нет «Частота» и monetary score."""
+
+    campaign_id = await _ingest(env)
+
+    text, _attachments = await bot_module.build_categories_view()
+
+    assert "Средняя давность последнего посещения" in text
+    assert "Средний чек" in text
+    assert "Частота" not in text
+    assert "monetary score" not in text
+
+    async with env.maker() as session:
+        categories = (
+            (
+                await session.execute(
+                    select(CampaignCategory).where(
+                        CampaignCategory.campaign_id == campaign_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert categories
+
+    card_text = bot_module._format_category_block(categories[0])
+    assert "Средняя давность последнего посещения" in card_text
+    assert "Частота" not in card_text
+    assert "monetary score" not in card_text
+
+
+async def test_export_campaigns_csv(env, spawned) -> None:
+    """Кнопка выгрузки отдаёт CSV со всеми кампаниями, а не список в чат."""
+
+    first_id = await _ingest(env)
+    second_id = await _ingest(env)
+
+    event = FakeCallbackEvent("adm:export", user_id=7)
+    context = RecordingContext()
+
+    await bot_module._handle_admin_callback(event, context, "7", "adm:export")
+
+    assert spawned == []
+    assert len(env.outgoing) == 1
+
+    attachments = env.outgoing[0]["attachments"]
+    assert attachments and len(attachments) == 1
+
+    media = attachments[0]
+    assert media.filename == "campaigns.csv"
+
+    data = media.buffer
+    assert data.startswith("\ufeff".encode("utf-8"))
+
+    text = data.decode("utf-8-sig")
+    lines = [line for line in text.splitlines() if line.strip()]
+
+    assert lines[0].startswith("campaign_id;status;")
+    assert len(lines) == 3
+    assert lines[1].startswith(f"{first_id};")
+    assert lines[2].startswith(f"{second_id};")
+    assert "DRAFT" in lines[1] and "DRAFT" in lines[2]
+
+
+async def test_send_failure_revokes_accrual(env, monkeypatch) -> None:
+    """Если MAX не принял сообщение — начисление откатывается."""
+
+    campaign_id = await _ingest(env)
+
+    async with env.maker() as session:
+        for client in (
+            (await session.execute(select(Client))).scalars().all()
+        ):
+            client.max_user_id = str(900000 + client.id)
+        await session.commit()
+
+    ok, message = await bot_module._approve_campaign(campaign_id)
+    assert ok is True, message
+
+    async def failing_outgoing(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(bot_module, "_outgoing", failing_outgoing)
+
+    result = await bot_module.send_campaign_offers(campaign_id)
+
+    assert result["sent"] == 0
+    assert result["failed"] > 0
+
+    accrued_keys = {
+        (item["campaign_id"], item["target_id"])
+        for item in env.loyalty.accruals
+    }
+    revoked_keys = {
+        (item["campaign_id"], item["target_id"])
+        for item in env.loyalty.revocations
+    }
+
+    assert accrued_keys
+    assert revoked_keys == accrued_keys
 
 
 # =========================================================

@@ -59,7 +59,8 @@ BALANCE_HEADER: list[str] = ["phone_e164", "balance", "updated_at"]
 OP_ACCRUAL = "ACCRUAL"
 OP_REDEMPTION = "REDEMPTION"
 OP_REVOKE = "REVOKE"
-KNOWN_OPS = {OP_ACCRUAL, OP_REDEMPTION, OP_REVOKE}
+OP_OPENING = "OPENING"
+KNOWN_OPS = {OP_ACCRUAL, OP_REDEMPTION, OP_REVOKE, OP_OPENING}
 
 #: Час суток, которым датируются эмулированные визиты.
 VISIT_HOUR = 12
@@ -441,10 +442,14 @@ class LoyaltyMockAdapter:
             if tx.op == OP_ACCRUAL:
                 if key not in self._accounts:
                     self._accounts[key] = self._account_from_tx(tx)
+                else:
+                    # Начисление могли отозвать и начислить повторно —
+                    # суммы по одному ключу складываются.
+                    self._accounts[key].amount += tx.amount
             elif tx.op == OP_REDEMPTION:
-                self._spent[key] = self._spent.get(key, 0) - tx.amount
+                self._spent[key] = self._spent.get(key, 0) + (-tx.amount)
             elif tx.op == OP_REVOKE:
-                self._revoked[key] = self._revoked.get(key, 0) - tx.amount
+                self._revoked[key] = self._revoked.get(key, 0) + (-tx.amount)
 
         self._rebuild_windows()
 
@@ -490,14 +495,17 @@ class LoyaltyMockAdapter:
                 amount_raw,
             )
             return None
+        # OPENING не относится к кампании — campaign_id/target_id игнорируются
+        campaign_id = _parse_int(campaign_raw) if op != OP_OPENING else None
+        target_id = _parse_int(target_raw) if op != OP_OPENING else None
         return _Transaction(
             tx_id=tx_id.strip(),
             ts=_coerce_dt(ts_raw.strip()),
             phone_e164=self._normalize_phone(phone_raw),
             op=op,
             amount=amount,
-            campaign_id=_parse_int(campaign_raw),
-            target_id=_parse_int(target_raw),
+            campaign_id=campaign_id,
+            target_id=target_id,
             note=note,
         )
 
@@ -690,6 +698,76 @@ class LoyaltyMockAdapter:
                 return account
         return None
 
+    def _write_campaign_redemption(
+        self,
+        phone_e164: str,
+        campaign_id: int,
+        amount: int,
+        visit_id: str,
+        ts_dt: datetime,
+        ts_text: str,
+    ) -> int:
+        """Списывает часть с кампанийных начислений и пишет строки журнала.
+
+        Возвращает фактически атрибутированную кампании сумму. Каждое
+        начисление получает отдельную строку REDEMPTION, поэтому после
+        перезагрузки ``_spent`` восстанавливается один в один.
+        """
+
+        remaining = int(amount)
+        written = 0
+
+        for account in list(self._accounts.values()):
+            if remaining <= 0:
+                break
+
+            if (
+                account.phone_e164 != phone_e164
+                or account.campaign_id != campaign_id
+            ):
+                continue
+
+            part = min(remaining, self._account_remainder(account))
+
+            if part <= 0:
+                continue
+
+            key = (account.campaign_id, account.target_id)
+            tx_id = f"red-{visit_id}-{account.target_id}"
+
+            self._append_row(
+                self._tx_path,
+                TX_HEADER,
+                [
+                    tx_id,
+                    ts_text,
+                    phone_e164,
+                    OP_REDEMPTION,
+                    -part,
+                    account.campaign_id,
+                    account.target_id,
+                    f"visit={visit_id}",
+                ],
+            )
+            self._tx.append(
+                _Transaction(
+                    tx_id=tx_id,
+                    ts=ts_dt,
+                    phone_e164=phone_e164,
+                    op=OP_REDEMPTION,
+                    amount=-part,
+                    campaign_id=account.campaign_id,
+                    target_id=account.target_id,
+                    note=f"visit={visit_id}",
+                )
+            )
+
+            self._spent[key] = self._spent.get(key, 0) + part
+            remaining -= part
+            written += part
+
+        return written
+
     # ------------------------------------------------------------------
     # Симуляция
     # ------------------------------------------------------------------
@@ -779,52 +857,63 @@ class LoyaltyMockAdapter:
         ts_text = _iso(ts_dt)
 
         bonus_spent = 0
-        if self._realise_rate > 0 and self._group_remainder(
-            phone, campaign_id
-        ) > 0:
+        if self._realise_rate > 0:
             u_redeem = self._hash_unit(phone, campaign_id, day, "redeem")
             if u_redeem < self._realise_rate:
-                account = self._first_target_with_remainder(
-                    phone, campaign_id
-                )
-                if account is not None:
-                    bonus_spent = int(
-                        min(self._account_remainder(account), check)
+                # У клиента ОДИН общий баланс: списываем из него.
+                total_balance = int(self._balances.get(phone, 0))
+                spendable = int(min(total_balance, check))
+
+                if spendable > 0:
+                    # Кампанийная часть: не больше неизрасходованного
+                    # остатка именно этой кампании.
+                    campaign_part = int(
+                        min(spendable, self._group_remainder(phone, campaign_id))
                     )
-                    if bonus_spent > 0:
+
+                    if campaign_part > 0:
+                        bonus_spent = self._write_campaign_redemption(
+                            phone,
+                            campaign_id,
+                            campaign_part,
+                            visit_id,
+                            ts_dt,
+                            ts_text,
+                        )
+
+                    # Остаток — «старые» бонусы клиента: списываются из
+                    # общего баланса, но к кампании не относятся.
+                    old_part = spendable - bonus_spent
+
+                    if old_part > 0:
                         self._append_row(
                             self._tx_path,
                             TX_HEADER,
                             [
-                                f"red-{visit_id}",
+                                f"red-old-{visit_id}",
                                 ts_text,
                                 phone,
                                 OP_REDEMPTION,
-                                -bonus_spent,
-                                account.campaign_id,
-                                account.target_id,
+                                -old_part,
+                                "",
+                                "",
                                 f"visit={visit_id}",
                             ],
                         )
                         self._tx.append(
                             _Transaction(
-                                tx_id=f"red-{visit_id}",
+                                tx_id=f"red-old-{visit_id}",
                                 ts=ts_dt,
                                 phone_e164=phone,
                                 op=OP_REDEMPTION,
-                                amount=-bonus_spent,
-                                campaign_id=account.campaign_id,
-                                target_id=account.target_id,
+                                amount=-old_part,
+                                campaign_id=None,
+                                target_id=None,
                                 note=f"visit={visit_id}",
                             )
                         )
-                        key = (account.campaign_id, account.target_id)
-                        self._spent[key] = (
-                            self._spent.get(key, 0) + bonus_spent
-                        )
-                        self._balances[phone] = (
-                            self._balances.get(phone, 0) - bonus_spent
-                        )
+
+                    self._balances[phone] = total_balance - spendable
 
         if visit_id not in self._visit_ids:
             self._append_row(
@@ -904,25 +993,41 @@ class LoyaltyMockAdapter:
 
             key = (int(campaign_id), int(target_id))
             existing = self._accounts.get(key)
+
             if existing is not None:
-                if existing.amount != requested:
-                    logger.warning(
-                        "LoyaltyMock: повторное начисление с другой суммой "
-                        "(%s вместо %s), campaign=%s target=%s — сохраняю "
-                        "первое значение",
-                        requested,
-                        existing.amount,
-                        key[0],
-                        key[1],
-                    )
-                else:
-                    logger.warning(
-                        "LoyaltyMock: повторное начисление, campaign=%s "
-                        "target=%s — пропуск",
-                        key[0],
-                        key[1],
-                    )
-                return
+                fully_revoked = (
+                    self._revoked.get(key, 0) >= existing.amount
+                )
+
+                if not fully_revoked:
+                    if existing.amount != requested:
+                        logger.warning(
+                            "LoyaltyMock: повторное начисление с другой суммой "
+                            "(%s вместо %s), campaign=%s target=%s — сохраняю "
+                            "первое значение",
+                            requested,
+                            existing.amount,
+                            key[0],
+                            key[1],
+                        )
+                    else:
+                        logger.warning(
+                            "LoyaltyMock: повторное начисление, campaign=%s "
+                            "target=%s — пропуск",
+                            key[0],
+                            key[1],
+                        )
+                    return
+
+                # Бонус был полностью отозван (например, бот откатил
+                # начисление из-за недоставленного сообщения) — начисляем
+                # повторно по тому же ключу.
+                logger.info(
+                    "LoyaltyMock: повторное начисление после полного отзыва, "
+                    "campaign=%s target=%s",
+                    key[0],
+                    key[1],
+                )
 
             phone = self._normalize_phone(phone_e164)
             now_dt = self._now_dt()
@@ -948,7 +1053,16 @@ class LoyaltyMockAdapter:
                 },
                 ensure_ascii=False,
             )
+            accrual_count = sum(
+                1
+                for tx in self._tx
+                if tx.op == OP_ACCRUAL
+                and tx.campaign_id == key[0]
+                and tx.target_id == key[1]
+            )
             tx_id = f"acc-{key[0]}-{key[1]}"
+            if accrual_count:
+                tx_id = f"{tx_id}-r{accrual_count}"
             self._append_row(
                 self._tx_path,
                 TX_HEADER,
@@ -963,7 +1077,15 @@ class LoyaltyMockAdapter:
                     note,
                 ],
             )
-            self._accounts[key] = account
+            if existing is not None:
+                existing.amount += requested
+                existing.recency = account.recency
+                existing.frequency = account.frequency
+                existing.avg_amount = account.avg_amount
+                existing.issued_at = account.issued_at or existing.issued_at
+                existing.ends_at = account.ends_at or existing.ends_at
+            else:
+                self._accounts[key] = account
             self._tx.append(
                 _Transaction(
                     tx_id=tx_id,
@@ -1024,28 +1146,6 @@ class LoyaltyMockAdapter:
             self._ensure_loaded()
 
             key = (int(campaign_id), int(target_id))
-            if key in self._revoked:
-                # Повтор (в т.ч. после отката транзакции бота): сумма уже
-                # отозвана, но сообщаем её же, чтобы учёт в отчёте не
-                # занижался при повторной попытке.
-                logger.warning(
-                    "LoyaltyMock: повторный отзыв, campaign=%s target=%s — "
-                    "уже отозвано %s",
-                    key[0],
-                    key[1],
-                    self._revoked[key],
-                )
-                return self._revoked[key]
-
-            account = self._accounts.get(key)
-            if account is None:
-                logger.warning(
-                    "LoyaltyMock: отзыв без начисления, campaign=%s "
-                    "target=%s — пропуск",
-                    key[0],
-                    key[1],
-                )
-                return 0
 
             requested = _parse_int(amount) or 0
             if requested <= 0:
@@ -1058,9 +1158,36 @@ class LoyaltyMockAdapter:
                 )
                 return 0
 
-            remainder = self._account_remainder(account)
-            revocable = min(requested, remainder)
+            account = self._accounts.get(key)
+            if account is None:
+                logger.warning(
+                    "LoyaltyMock: отзыв без начисления, campaign=%s "
+                    "target=%s — пропуск",
+                    key[0],
+                    key[1],
+                )
+                return 0
+
+            remainder = self._group_remainder(account.phone_e164, key[0])
+            total_balance = int(self._balances.get(account.phone_e164, 0))
+            revocable = max(0, min(requested, remainder, total_balance))
+
             if revocable <= 0:
+                already = self._revoked.get(key, 0)
+
+                if already > 0:
+                    # Повтор (в т.ч. после отката транзакции бота):
+                    # сообщаем уже отозванную сумму, чтобы учёт в отчёте
+                    # не занижался.
+                    logger.warning(
+                        "LoyaltyMock: повторный отзыв, campaign=%s target=%s — "
+                        "уже отозвано %s",
+                        key[0],
+                        key[1],
+                        already,
+                    )
+                    return already
+
                 logger.warning(
                     "LoyaltyMock: отзывать нечего, campaign=%s target=%s — "
                     "пропуск",
@@ -1100,7 +1227,7 @@ class LoyaltyMockAdapter:
             self._balances[account.phone_e164] = (
                 self._balances.get(account.phone_e164, 0) - revocable
             )
-            self._revoked[key] = revocable
+            self._revoked[key] = self._revoked.get(key, 0) + revocable
             self._write_balances()
             self._refresh_signature()
             logger.info(

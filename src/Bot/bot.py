@@ -1,14 +1,6 @@
 # src/Bot/bot.py
-"""MAX-бот Win-Back MVP: один бот = один малый бизнес.
-
-Бот — это только интерфейс над существующим backend'ом проекта:
-
-    CSV бизнеса -> Pipeline -> история покупок в PostgreSQL ->
-    аналитика (BusinessMetrics / UserCategories / BonusPolicy) ->
-    5 маркетинговых групп -> бонусы -> кампания -> предложения в MAX ->
-    результат кампании.
-
-Принципы:
+"""
+Принципы работы:
 
 * аналитика не переписывается — используется :class:`src.pipeline.Pipeline`;
 * работа с БД идёт только через ``src.DB.database.async_session``
@@ -28,13 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
 import io
 import logging
 import os
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -97,15 +90,12 @@ try:
         BotStarted,
         CallbackButton,
         MessageCallback,
+        InputMediaBuffer,
         MessageCreated,
         RequestContactButton,
     )
     from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
-except ImportError as exc:  # pragma: no cover - зависит от окружения
-    # maxapi не установлен. Модуль всё равно должен импортироваться
-    # (проверка импортов, тесты, статический анализ), поэтому ниже —
-    # минимальная заглушка. Работа бота в этом режиме невозможна:
-    # main() сообщит об отсутствии зависимости.
+except ImportError as exc: 
     MAXAPI_AVAILABLE = False
     MAXAPI_IMPORT_ERROR = exc
 
@@ -196,6 +186,13 @@ except ImportError as exc:  # pragma: no cover - зависит от окруж�
     class RequestContactButton:  # type: ignore[no-redef]
         def __init__(self, *, text: str = "", **kwargs: Any) -> None:
             self.text = text
+
+    class InputMediaBuffer:  # type: ignore[no-redef]
+        def __init__(
+            self, *, buffer: bytes = b"", filename: str = "", **kwargs: Any
+        ) -> None:
+            self.buffer = buffer
+            self.filename = filename
 
     class InlineKeyboardBuilder:  # type: ignore[no-redef]
         def __init__(self) -> None:
@@ -599,7 +596,7 @@ async def _campaign_is_active(campaign_id: int) -> bool:
     return (
         status == CampaignStatus.APPROVED.value
         and ends_at is not None
-        and ends_at > datetime.utcnow()
+        and ends_at > _utcnow()
     )
 
 
@@ -768,6 +765,15 @@ def _fmt_dt(value: datetime | None) -> str:
         return value.strftime("%Y-%m-%d %H:%M UTC")
     except (AttributeError, ValueError):
         return str(value)
+
+
+def _utcnow() -> datetime:
+    """Текущее время в naive UTC (в БД время хранится без таймзоны).
+
+    Заменяет deprecated ``_utcnow()`` без изменения семантики.
+    """
+
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
@@ -1049,11 +1055,13 @@ def admin_menu_keyboard(campaign_id: int | None = None):
         builder.row(
             CallbackButton(text="🚀 Запустить кампанию", payload=f"adm:launch:{campaign_id}")
         )
-        builder.row(
-            CallbackButton(text="📤 Отправить предложения", payload=f"adm:send:{campaign_id}")
-        )
 
     builder.row(CallbackButton(text="📊 Отчёт", payload="adm:report"))
+    builder.row(
+        CallbackButton(
+            text="📤 Выгрузить историю кампаний (CSV)", payload="adm:export"
+        )
+    )
 
     return builder.as_markup()
 
@@ -1062,7 +1070,7 @@ def client_menu_keyboard():
     """Меню клиента."""
 
     builder = InlineKeyboardBuilder()
-    builder.row(CallbackButton(text="🎁 Моё предложение", payload="cli:offer"))
+    builder.row(CallbackButton(text="🎁 Персональные предложения", payload="cli:offer"))
     builder.row(
         CallbackButton(text="💳 Бонусы", payload="cli:balance"),
         CallbackButton(text="ℹ️ Программа", payload="cli:program"),
@@ -1094,10 +1102,8 @@ def _format_category_block(category: CampaignCategory) -> str:
     return (
         f"{title}\n"
         f"Клиентов: {int(category.clients_count)}\n"
-        f"Средняя давность: {_fmt(category.avg_recency)} дн.\n"
-        f"Частота: {_fmt(category.avg_frequency)}\n"
+        f"Средняя давность последнего посещения: {_fmt(category.avg_recency)} дн.\n"
         f"Средний чек: {_fmt(category.avg_amount)} ₽\n"
-        f"Средний monetary score: {_fmt(category.avg_monetary_score)}\n"
         f"Предлагаемый бонус: {int(category.proposed_bonus)}\n"
         f"Итоговый бонус: {int(category.final_bonus)}"
     )
@@ -1123,7 +1129,7 @@ async def build_admin_menu() -> tuple[str, list[Any]]:
             "🛠 Админ-меню\n\n"
             f"Кампания #{campaign.id}: {campaign.status}\n"
             f"Получателей: {recipients} из {campaign.total_clients} клиентов\n"
-            f"Окончание: {_fmt_dt(campaign.campaign_ends_at)}"
+            f"Окончание: {_fmt_dt(campaign.campaign_ends_at)}\n"
         )
         campaign_id = campaign.id
 
@@ -1156,6 +1162,107 @@ async def build_campaign_card() -> tuple[str, list[Any]]:
         campaign_id = campaign.id
 
     return text, [admin_menu_keyboard(campaign_id)]
+
+
+async def build_campaigns_history_csv() -> tuple[int, bytes]:
+    """CSV со сводкой по ВСЕМ кампаниям (чтобы не забивать чат).
+
+    Возвращает ``(количество кампаний, байты файла)``. Файл в utf-8-sig,
+    разделитель ``;`` — так Excel открывает его без настроек.
+    """
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=";")
+
+    writer.writerow(
+        [
+            "campaign_id",
+            "status",
+            "created_at",
+            "ends_at",
+            "source_file",
+            "total_clients",
+            "targets",
+            "delivered",
+            "bonus_issued",
+            "bonus_realised",
+            "bonus_revoked",
+            "conversion_percent",
+        ]
+    )
+
+    async with session_scope() as session:
+        campaigns = list(
+            (await session.execute(select(Campaign).order_by(Campaign.id)))
+            .scalars()
+            .all()
+        )
+
+        for campaign in campaigns:
+            targets = await get_campaign_targets(session, campaign.id)
+            clients = await _load_clients_by_ids(
+                session, [target.client_id for target in targets]
+            )
+
+            offers = 0
+            delivered = 0
+            issued = 0
+            realised = 0
+            to_revoke = 0
+            realised_count = 0
+
+            for target in targets:
+                amount = int(target.bonus_amount or 0)
+
+                if amount <= 0:
+                    continue
+
+                offers += 1
+                client = clients.get(target.client_id)
+
+                if client is None or not client.max_user_id:
+                    continue
+
+                delivered += 1
+                issued += amount
+
+                target_realised = int(target.bonus_realised or 0)
+                realised += target_realised
+
+                if target_realised > 0:
+                    realised_count += 1
+
+                if target_realised < amount:
+                    to_revoke += amount - target_realised
+
+            revoked = to_revoke
+
+            if campaign.status == CampaignStatus.COMPLETED.value:
+                stored = (campaign.config or {}).get("revoked_total")
+
+                if stored is not None:
+                    revoked = int(stored)
+
+            conversion = (realised_count / offers * 100.0) if offers else 0.0
+
+            writer.writerow(
+                [
+                    campaign.id,
+                    campaign.status,
+                    _fmt_dt(campaign.launched_at),
+                    _fmt_dt(campaign.campaign_ends_at),
+                    campaign.source_file_path or "",
+                    int(campaign.total_clients or 0),
+                    offers,
+                    delivered,
+                    issued,
+                    realised,
+                    revoked,
+                    f"{conversion:.1f}",
+                ]
+            )
+
+    return len(campaigns), buffer.getvalue().encode("utf-8-sig")
 
 
 async def build_categories_view() -> tuple[str, list[Any]]:
@@ -1380,7 +1487,7 @@ async def build_campaign_report(
         f"{_fmt_dt(campaign.campaign_ends_at)}\n\n"
         f"Всего клиентов в выборке: {campaign.total_clients}\n"
         f"Целевых клиентов (targets): {offers}\n"
-        f"Доставляемо (есть MAX user_id): {deliverable}\n"
+        f"Доставлено (есть MAX user_id): {deliverable}\n"
         f"Не доставлено (нет MAX user_id): {undelivered}\n"
         f"Реализовали бонус: {realised_count}\n"
         f"Конверсия: {conversion:.1f}%\n\n"
@@ -1742,7 +1849,7 @@ async def _client_offer_text(session, client: Client) -> str:
             CampaignTarget.client_id == client.id,
             CampaignTarget.bonus_amount > 0,
             Campaign.status == CampaignStatus.APPROVED.value,
-            Campaign.campaign_ends_at > datetime.utcnow(),
+            Campaign.campaign_ends_at > _utcnow(),
         )
         .order_by(CampaignTarget.id.desc())
         .limit(1)
@@ -2152,7 +2259,7 @@ async def _approve_campaign(campaign_id: int | None) -> tuple[bool, str]:
             )
 
         extra = ""
-        now = datetime.utcnow()
+        now = _utcnow()
 
         if campaign.campaign_ends_at is None or campaign.campaign_ends_at <= now:
             campaign.campaign_ends_at = now + timedelta(days=CAMPAIGN_DAYS)
@@ -2345,63 +2452,38 @@ async def _handle_admin_callback(
         return
 
     if action == "send":
-        campaign_id = _to_int(parts[2]) if len(parts) > 2 else None
-        force = len(parts) > 3 and parts[3] == "force"
-
-        if campaign_id is None:
-            await _safe_ack(
-                event,
-                "Карточка устарела. Откройте «📤 Отправить предложения» заново.",
-            )
-            return
-
-        stale = await _stale_campaign_message(campaign_id)
-
-        if stale:
-            text, attachments = await build_admin_menu()
-            await _safe_edit(event, text, attachments, notification=stale)
-            return
-
-        state = await _campaign_send_state(campaign_id)
-
-        if state["status"] != CampaignStatus.APPROVED.value:
-            text, attachments = await build_campaign_card()
-            await _safe_edit(
-                event,
-                text,
-                attachments,
-                notification=(
-                    "Сначала запустите кампанию: рассылка возможна только "
-                    "в статусе APPROVED."
-                ),
-            )
-            return
-
-        if state["offers_sent"] and not force:
-            sent_before = state["offers_sent"].get("sent")
-
-            builder = InlineKeyboardBuilder()
-            builder.row(
-                CallbackButton(
-                    text="✅ Отправить повторно", payload=f"adm:send:{campaign_id}:force"
-                ),
-                CallbackButton(text="❌ Отмена", payload="adm:campaign"),
-            )
-
-            await _safe_edit(
-                event,
-                f"📤 Кампания #{campaign_id} уже рассылалась "
-                f"(отправлено: {sent_before if sent_before is not None else '?'}).\n\n"
-                "Повторная рассылка отправит предложения ещё раз.",
-                [builder.as_markup()],
-            )
-            return
-
-        _spawn(
-            send_campaign_offers(campaign_id, force=force),
-            label=f"send_campaign_{campaign_id}",
+        # Кнопка удалена: бизнес не должен иметь возможности отправить
+        # предложения повторно. Рассылка идёт один раз при запуске кампании.
+        text, attachments = await build_admin_menu()
+        await _safe_edit(
+            event,
+            text,
+            attachments,
+            notification=(
+                "Действие недоступно: рассылка выполняется один раз "
+                "при запуске кампании."
+            ),
         )
-        await _safe_ack(event, "Рассылка запущена.")
+        return
+
+    if action == "export":
+        try:
+            count, data = await build_campaigns_history_csv()
+        except Exception as exc:
+            logger.exception("Не удалось собрать историю кампаний: %r", exc)
+            await _safe_ack(event, "Не удалось собрать историю кампаний.")
+            return
+
+        media = InputMediaBuffer(buffer=data, filename="campaigns.csv")
+        chat_id, target_user = _callback_target(event)
+
+        await _outgoing(
+            f"📊 История кампаний: {count} шт. Файл во вложении.",
+            attachments=[media],
+            chat_id=chat_id,
+            user_id=target_user,
+        )
+        await _safe_ack(event)
         return
 
     if action == "report":
@@ -2625,7 +2707,7 @@ async def send_campaign_offers(
         )
         return {"error": 1}
 
-    if ends_at is not None and ends_at <= datetime.utcnow():
+    if ends_at is not None and ends_at <= _utcnow():
         logger.warning("Рассылка кампании #%s невозможна: срок истёк", campaign_id)
         await _notify_admins(
             f"⚠️ Кампания #{campaign_id} просрочена, рассылка отменена."
@@ -2752,6 +2834,23 @@ async def send_campaign_offers(
                     item["target_id"],
                 )
 
+                # Оффер не доставлен — откатываем начисление, иначе бонус
+                # «зависнет» у клиента, а статистика кампании соврёт.
+                if phone:
+                    try:
+                        await loyalty.revoke_bonus(
+                            phone_e164=phone,
+                            amount=bonus,
+                            campaign_id=campaign_id,
+                            target_id=item["target_id"],
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "Не удалось откатить начисление target=%s: %r",
+                            item["target_id"],
+                            exc,
+                        )
+
             if SEND_DELAY_SECONDS > 0:
                 await asyncio.sleep(SEND_DELAY_SECONDS)
     finally:
@@ -2776,7 +2875,7 @@ async def send_campaign_offers(
                 if campaign is not None:
                     fresh = dict(campaign.config or {})
                     fresh["offers_sent"] = {
-                        "at": datetime.utcnow().isoformat(timespec="seconds"),
+                        "at": _utcnow().isoformat(timespec="seconds"),
                         "sent": sent,
                         "failed": failed,
                         "skipped": skipped,
@@ -2816,7 +2915,7 @@ async def finish_expired_campaigns() -> list[tuple[int, str]]:
     (отзывы идемпотентны по target_id).
     """
 
-    now = datetime.utcnow()
+    now = _utcnow()
 
     with contextlib.suppress(Exception):
         await loyalty.advance(now)
@@ -2830,8 +2929,16 @@ async def finish_expired_campaigns() -> list[tuple[int, str]]:
                 Campaign.campaign_ends_at <= now,
             )
         )
+        campaigns = list(result.scalars().all())
 
-        for campaign in result.scalars().all():
+        if campaigns:
+            logger.info(
+                "Завершение кампаний: к обработке %s шт. (сейчас %s UTC)",
+                len(campaigns),
+                now.isoformat(timespec="seconds"),
+            )
+
+        for campaign in campaigns:
             if campaign.id in _sending_campaigns:
                 logger.info(
                     "Кампания #%s ещё рассылается, завершение отложено",
@@ -2963,7 +3070,12 @@ async def campaign_finish_worker(
 
     while True:
         try:
-            for _campaign_id, report in await finish_expired_campaigns():
+            due = await finish_expired_campaigns()
+
+            if not due:
+                logger.debug("Проверка завершения кампаний: готовых нет")
+
+            for _campaign_id, report in due:
                 await _notify_admins(report)
         except asyncio.CancelledError:
             logger.info("Time-machine завершения кампаний остановлен")

@@ -174,14 +174,23 @@ async def test_revoke_full_partial_and_without_accrual(
     assert len(revokes) == 1
     assert int(revokes[0]["amount"]) == -30
 
-    # Повторный отзыв по тому же ключу — no-op.
+    # Второй отзыв добирает неизрасходованный остаток.
+    second = await adapter.revoke_bonus(
+        phone_e164=PHONE, amount=70, campaign_id=1, target_id=1
+    )
+    assert second == 70
+    assert len(rows_with_op(data_dir / "transactions.csv", "REVOKE")) == 2
+    assert await adapter.fetch_balance(PHONE) == 0
+
+    # Когда отзывать уже нечего — повтор возвращает отозванную сумму.
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-        await adapter.revoke_bonus(
+        repeat = await adapter.revoke_bonus(
             phone_e164=PHONE, amount=70, campaign_id=1, target_id=1
         )
+    assert repeat == 100
     assert "повторный отзыв" in caplog.text
-    assert len(rows_with_op(data_dir / "transactions.csv", "REVOKE")) == 1
-    assert await adapter.fetch_balance(PHONE) == 70
+    assert len(rows_with_op(data_dir / "transactions.csv", "REVOKE")) == 2
+    assert await adapter.fetch_balance(PHONE) == 0
 
     # Полный отзыв: min(запрошенная, остаток).
     await adapter.accrue_bonus(
@@ -197,7 +206,7 @@ async def test_revoke_full_partial_and_without_accrual(
     ]
     assert len(revokes) == 1
     assert int(revokes[0]["amount"]) == -40
-    assert await adapter.fetch_balance(PHONE) == 70
+    assert await adapter.fetch_balance(PHONE) == 0
 
     # Нулевой запрос — no-op без строки.
     await adapter.accrue_bonus(
@@ -211,7 +220,7 @@ async def test_revoke_full_partial_and_without_accrual(
         for row in rows_with_op(data_dir / "transactions.csv", "REVOKE")
         if row.get("target_id") == "3"
     ]
-    assert await adapter.fetch_balance(PHONE) == 85
+    assert await adapter.fetch_balance(PHONE) == 15
 
 
 # ----------------------------------------------------------------------
@@ -497,18 +506,25 @@ async def test_revoke_bonus_returns_actual_amount(tmp_path: Path) -> None:
     assert int(revokes[0]["amount"]) == -30
     total_before = sum(int(row["amount"]) for row in revokes)
 
-    # Повтор того же ключа: возвращает ту же сумму (не 0) и не пишет строку.
+    # Повтор добирает остаток: сумма не превышает начисленного.
     repeat = await adapter.revoke_bonus(
         phone_e164=PHONE, amount=70, campaign_id=1, target_id=1
     )
 
-    assert repeat == 30
-    assert repeat != 0
-    assert await adapter.fetch_balance(PHONE) == 70
+    assert repeat == 70
+    assert await adapter.fetch_balance(PHONE) == 0
 
     revokes = rows_with_op(tx_path, "REVOKE")
-    assert len(revokes) == 1
-    assert sum(int(row["amount"]) for row in revokes) == total_before
+    assert len(revokes) == 2
+    assert sum(int(row["amount"]) for row in revokes) == -100
+
+    # Когда отзывать нечего, повтор возвращает уже отозванную сумму.
+    nothing_left = await adapter.revoke_bonus(
+        phone_e164=PHONE, amount=70, campaign_id=1, target_id=1
+    )
+
+    assert nothing_left == 100
+    assert len(rows_with_op(tx_path, "REVOKE")) == 2
 
     # Фактическая сумма = min(запрошенная, неизрасходованный остаток).
     await adapter.accrue_bonus(
@@ -520,7 +536,8 @@ async def test_revoke_bonus_returns_actual_amount(tmp_path: Path) -> None:
     )
 
     assert capped == 40
-    assert await adapter.fetch_balance(PHONE) == 70
+    assert await adapter.fetch_balance(PHONE) == 0
+    assert total_before == -30
 
 
 # ----------------------------------------------------------------------
@@ -554,3 +571,166 @@ async def test_phone_masked_in_snapshot_and_logs(
     assert messages
     assert PHONE not in messages
     assert "***0001" in messages
+
+
+# ----------------------------------------------------------------------
+# 12. Один общий баланс клиента + атрибуция бонусов кампании
+# ----------------------------------------------------------------------
+
+OPENING_AMOUNT = 50
+CAMPAIGN_BONUS = 100
+TOTAL_BALANCE = OPENING_AMOUNT + CAMPAIGN_BONUS
+
+
+def seed_opening_balance(data_dir: Path, phone: str, amount: int) -> None:
+    """Пишет «старый» баланс клиента (op=OPENING) до создания адаптера."""
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(
+        data_dir / "transactions.csv", "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "tx_id",
+                "ts",
+                "phone_e164",
+                "op",
+                "amount",
+                "campaign_id",
+                "target_id",
+                "note",
+            ]
+        )
+        writer.writerow(
+            [
+                "open-1",
+                "2026-09-01T10:00:00",
+                phone,
+                "OPENING",
+                amount,
+                "",
+                "",
+                "opening balance",
+            ]
+        )
+
+
+def journal_total(data_dir: Path, phone: str) -> int:
+    """Баланс как сумма amount по журналу (проверка инварианта)."""
+
+    return sum(
+        int(row["amount"])
+        for row in read_rows(data_dir / "transactions.csv")
+        if row.get("phone_e164") == phone
+    )
+
+
+@pytest.mark.parametrize(
+    ("spend", "expected_balance", "expected_realised"),
+    [
+        (0, 150, 0),
+        (30, 120, 30),
+        (70, 80, 70),
+        (100, 50, 100),
+        (150, 0, 100),
+    ],
+)
+async def test_shared_balance_and_campaign_attribution(
+    tmp_path: Path,
+    spend: int,
+    expected_balance: int,
+    expected_realised: int,
+) -> None:
+    """Старые и кампанийные бонусы — один баланс; realised <= bonus_amount."""
+
+    data_dir = tmp_path / f"shared_{spend}"
+    seed_opening_balance(data_dir, PHONE, OPENING_AMOUNT)
+
+    adapter = LoyaltyMockAdapter(
+        data_dir=data_dir,
+        now=lambda: FIXED_NOW,
+        realise_rate=1.0,
+        seed=1,
+    )
+
+    # Один день окна: чек = avg_amount * 0.6 при u_amount = 0.
+    await adapter.accrue_bonus(
+        phone_e164=PHONE,
+        amount=CAMPAIGN_BONUS,
+        campaign_id=1,
+        target_id=1,
+        recency=10,
+        frequency=3,
+        avg_amount=(spend / 0.6 if spend else 300.0),
+        issued_at=ISSUED,
+        ends_at=ENDS,
+    )
+
+    assert await adapter.fetch_balance(PHONE) == TOTAL_BALANCE
+
+    # Детерминированная симуляция: визит есть всегда, списание — по сценарию.
+    adapter._hash_unit = lambda *args, **kwargs: 0.0
+
+    if spend == 0:
+        adapter._realise_rate = 0.0
+
+    realised = await adapter.fetch_realised(
+        campaign_id=1,
+        target_id=1,
+        phone_e164=PHONE,
+        bonus_amount=CAMPAIGN_BONUS,
+        issued_at=ISSUED,
+        ends_at=ENDS,
+    )
+    balance = await adapter.fetch_balance(PHONE)
+
+    assert realised is not None
+    assert realised == expected_realised
+    assert realised <= CAMPAIGN_BONUS
+    assert balance == expected_balance
+    # Баланс — это ровно сумма операций в журнале.
+    assert journal_total(data_dir, PHONE) == expected_balance
+
+    # «Рестарт»: состояние восстанавливается из CSV один в один.
+    restarted = LoyaltyMockAdapter(
+        data_dir=data_dir,
+        now=lambda: FIXED_NOW,
+        realise_rate=1.0,
+        seed=1,
+    )
+
+    assert await restarted.fetch_balance(PHONE) == expected_balance
+    assert (
+        await restarted.fetch_realised(
+            campaign_id=1,
+            target_id=1,
+            phone_e164=PHONE,
+            bonus_amount=CAMPAIGN_BONUS,
+            issued_at=ISSUED,
+            ends_at=ENDS,
+        )
+        == expected_realised
+    )
+
+
+async def test_revoke_keeps_old_bonuses(tmp_path: Path) -> None:
+    """Отзыв кампании не трогает «старые» бонусы и не уводит баланс в минус."""
+
+    data_dir = tmp_path / "revoke_shared"
+    seed_opening_balance(data_dir, PHONE, OPENING_AMOUNT)
+
+    adapter = LoyaltyMockAdapter(data_dir=data_dir, now=lambda: FIXED_NOW)
+
+    await adapter.accrue_bonus(
+        phone_e164=PHONE, amount=CAMPAIGN_BONUS, campaign_id=1, target_id=1
+    )
+
+    revoked = await adapter.revoke_bonus(
+        phone_e164=PHONE, amount=1000, campaign_id=1, target_id=1
+    )
+
+    assert revoked == CAMPAIGN_BONUS
+    assert await adapter.fetch_balance(PHONE) == OPENING_AMOUNT
+    assert journal_total(data_dir, PHONE) == OPENING_AMOUNT
